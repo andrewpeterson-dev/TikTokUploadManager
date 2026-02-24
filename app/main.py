@@ -31,6 +31,7 @@ try:
     from app.services.video_engine import GeneratedClip, VideoEngine
     from app.services.shortform_ai_engine import SHORTFORM_AI_ENABLED, optimize_shortform_video
     from app.services.ai_video_generator import AIVideoGenerator
+    from app.services.style_profiles import get_available_video_types as get_available_ai_video_types
 except ModuleNotFoundError:
     project_root = APP_ROOT.parent
     if str(project_root) not in sys.path:
@@ -42,6 +43,19 @@ except ModuleNotFoundError:
     from services.video_engine import GeneratedClip, VideoEngine
     from services.shortform_ai_engine import SHORTFORM_AI_ENABLED, optimize_shortform_video
     from services.ai_video_generator import AIVideoGenerator
+    from services.style_profiles import get_available_video_types as get_available_ai_video_types
+
+try:
+    from app.services.cinematic_engine import CinematicConfig, cinematic_render, config_from_analysis
+    from app.services.shortform_ai_engine import analyze_script, analyze_frames
+    CINEMATIC_ENABLED = True
+except Exception:
+    try:
+        from services.cinematic_engine import CinematicConfig, cinematic_render, config_from_analysis
+        from services.shortform_ai_engine import analyze_script, analyze_frames
+        CINEMATIC_ENABLED = True
+    except Exception:
+        CINEMATIC_ENABLED = False
 
 
 class JsonFormatter(logging.Formatter):
@@ -510,11 +524,30 @@ def command_generate_ai_video(args: argparse.Namespace) -> int:
         caption_for_storage = fallback_caption
         transcript = fallback_transcript
 
-    # Integration point:
-    # video = generate_video()
-    # if SHORTFORM_AI_ENABLED:
-    #     video = optimize_shortform_video(video, transcript)
-    if SHORTFORM_AI_ENABLED:
+    # Skip extra re-encoding when AI style pipeline already delivered a styled render.
+    output_is_ai_styled = Path(video_path).name.endswith("_styled.mp4")
+
+    # Cinematic engine — single-pass render with grading, motion, grain, etc.
+    if CINEMATIC_ENABLED and not output_is_ai_styled:
+        try:
+            progress("Running cinematic render engine...")
+            video_file_path = Path(video_path)
+            duration_for_analysis = float(args.duration)
+            script_profile = analyze_script(transcript, duration_for_analysis)
+            frame_summary = analyze_frames(video_path)
+            cine_config = config_from_analysis(args.theme, script_profile, frame_summary)
+            bg = _pick_background_video_for_theme(storage, args.theme)
+            cine_output = video_file_path.with_name(
+                f"{video_file_path.stem}_cinematic{video_file_path.suffix}"
+            )
+            cinematic_render(video_file_path, cine_output, bg, transcript, cine_config)
+            video_path = str(cine_output)
+            progress("Cinematic render complete.")
+        except Exception as exc:
+            LOGGER.warning("Cinematic engine failed, falling through: %s", exc)
+
+    # Shortform optimizer (skip when style engine already did final polish).
+    if SHORTFORM_AI_ENABLED and not output_is_ai_styled:
         progress("Running short-form AI optimization...")
         video_path = optimize_shortform_video(video_path, transcript)
 
@@ -597,7 +630,8 @@ def build_parser() -> argparse.ArgumentParser:
     generate_ai = subparsers.add_parser("generate-ai-video", help="Generate AI-powered video")
     generate_ai.add_argument("--theme", default="scary", choices=["scary", "dating", "crazy", "mystery", "motivational", "creepy", "interesting"])
     generate_ai.add_argument("--duration", type=int, default=60, choices=[30, 60, 90, 120])
-    generate_ai.add_argument("--video-type", default="story", choices=["story", "commentary", "news"])
+    ai_video_types = sorted(set(get_available_ai_video_types()))
+    generate_ai.add_argument("--video-type", default="story", choices=ai_video_types)
     generate_ai.set_defaults(func=command_generate_ai_video)
 
     return parser

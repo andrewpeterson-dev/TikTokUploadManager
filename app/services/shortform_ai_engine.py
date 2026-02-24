@@ -685,6 +685,14 @@ def _replace_original(original: Path, replacement: Path) -> str:
     return str(original)
 
 
+def analyze_script(transcript: str, duration: float) -> Dict[str, Any]:
+    return _script_analysis(transcript, duration)
+
+
+def analyze_frames(video_path: str) -> Dict[str, Any]:
+    return _frame_summary_opencv(Path(video_path))
+
+
 def optimize_shortform_video(video_path: str, transcript: str) -> str:
     """
     Master short-form AI optimization pipeline (single-pass).
@@ -702,6 +710,11 @@ def optimize_shortform_video(video_path: str, transcript: str) -> str:
     if not original.exists():
         LOGGER.error("shortform optimize requested for missing file: %s", original)
         return video_path
+
+    # Skip if cinematic engine already processed this video.
+    if original.with_suffix(".cinematic_done").exists():
+        LOGGER.info("Cinematic engine already processed %s; skipping shortform.", original.name)
+        return str(original)
 
     if not SHORTFORM_AI_ENABLED:
         LOGGER.info("shortform optimization disabled; keeping original %s", original.name)

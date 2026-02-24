@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 from urllib.parse import urlparse
+from .export_profiles import standard_1080x1920_profile
 
 try:
     from .shortform_ai_engine import SHORTFORM_AI_ENABLED, optimize_shortform_video
@@ -19,6 +20,13 @@ except Exception:  # pragma: no cover - fallback keeps pipeline safe if module i
 
     def optimize_shortform_video(video_path: str, transcript: str) -> str:
         return video_path
+
+try:
+    from .cinematic_engine import CinematicConfig, cinematic_render
+
+    CINEMATIC_AVAILABLE = True
+except Exception:
+    CINEMATIC_AVAILABLE = False
 
 from .storage import AppStorage
 
@@ -265,6 +273,7 @@ Dialogue: 0,0:00:00.00,{self._format_ass_timestamp(duration_seconds)},Caption,,0
         caption: Optional[str] = None,
         background_path: Optional[Path] = None,
         apply_shortform_optimization: bool = True,
+        cinematic_config: Optional[object] = None,
     ) -> Path:
         if not source_path.exists():
             raise RuntimeError(f"Source video not found: {source_path}")
@@ -272,6 +281,16 @@ Dialogue: 0,0:00:00.00,{self._format_ass_timestamp(duration_seconds)},Caption,,0
         bg_asset = background_path or self._pick_background_asset()
         if not bg_asset.exists():
             raise RuntimeError(f"Background asset not found: {bg_asset}")
+
+        # Cinematic path — single-pass render with grading, motion, etc.
+        if cinematic_config is not None and CINEMATIC_AVAILABLE:
+            try:
+                return cinematic_render(
+                    source_path, output_path, bg_asset,
+                    caption or "", cinematic_config,
+                )
+            except Exception:
+                LOGGER.warning("Cinematic render failed, falling back to standard pipeline", exc_info=True)
 
         source_meta = self._probe_video(source_path)
         duration = float(source_meta["duration"])
@@ -285,7 +304,8 @@ Dialogue: 0,0:00:00.00,{self._format_ass_timestamp(duration_seconds)},Caption,,0
             "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=30:15[srcblur]",
             "[bg][srcblur]blend=all_mode='overlay':all_opacity=0.35[base]",
             "[0:v]scale='if(gt(iw,1080),1080,iw)':'if(gt(ih,1728),1728,ih)':force_original_aspect_ratio=decrease,setsar=1[fg]",
-            "[base][fg]overlay=(W-w)/2:(H-h)/2:shortest=1,eq=contrast=1.04:saturation=1.06:brightness=0.02[vtmp]",
+            "[base][fg]overlay=(W-w)/2:(H-h)/2:shortest=1,eq=contrast=1.05:saturation=1.04:brightness=0.01,setsar=1[vtmp]",
+            "fps=60",
         ]
 
         ass_file: Optional[Path] = None
@@ -303,6 +323,7 @@ Dialogue: 0,0:00:00.00,{self._format_ass_timestamp(duration_seconds)},Caption,,0
             output_label = "[vtmp]"
 
         filter_complex = ";".join(filter_segments)
+        export_profile = standard_1080x1920_profile()
         cmd: List[str] = ["-i", str(source_path)]
         if bg_asset.suffix.lower() in IMAGE_EXTENSIONS:
             cmd += ["-loop", "1", "-i", str(bg_asset)]
@@ -319,21 +340,29 @@ Dialogue: 0,0:00:00.00,{self._format_ass_timestamp(duration_seconds)},Caption,,0
             "-t",
             f"{duration:.3f}",
             "-c:v",
-            "libx264",
+            export_profile.video_codec,
+            "-profile:v",
+            export_profile.video_profile,
             "-preset",
-            "fast",
+            export_profile.video_preset,
             "-crf",
-            "18",
+            str(export_profile.crf),
             "-pix_fmt",
-            "yuv420p",
+            export_profile.pixel_format,
             "-r",
-            "30",
+            str(export_profile.fps),
+            "-b:v",
+            export_profile.bitrate,
+            "-maxrate",
+            export_profile.maxrate,
+            "-bufsize",
+            export_profile.bufsize,
             "-c:a",
-            "aac",
+            export_profile.audio_codec,
             "-b:a",
-            "192k",
+            export_profile.audio_bitrate,
             "-ar",
-            "48000",
+            str(export_profile.audio_sample_rate),
             "-movflags",
             "+faststart",
             "-shortest",
@@ -367,14 +396,28 @@ Dialogue: 0,0:00:00.00,{self._format_ass_timestamp(duration_seconds)},Caption,,0
                 str(max(1, duration)),
                 "-c:v",
                 "libx264",
+                "-profile:v",
+                "high",
                 "-preset",
                 "veryfast",
                 "-crf",
-                "18",
+                "20",
+                "-pix_fmt",
+                "yuv420p",
+                "-r",
+                "60",
+                "-b:v",
+                "6M",
+                "-maxrate",
+                "8M",
+                "-bufsize",
+                "12M",
                 "-c:a",
                 "aac",
                 "-b:a",
                 "160k",
+                "-ar",
+                "48000",
                 "-movflags",
                 "+faststart",
                 str(output_path),
