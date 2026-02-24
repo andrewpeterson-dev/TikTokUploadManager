@@ -13,13 +13,15 @@ from urllib import error, request
 
 try:
     import cv2  # type: ignore
-    import numpy as np  # type: ignore
+import numpy as np  # type: ignore
 
     CV_AVAILABLE = True
 except Exception:
     cv2 = None
     np = None
     CV_AVAILABLE = False
+
+from .export_profiles import standard_1080x1920_profile
 
 LOGGER = logging.getLogger("tiktok_manager.shortform_ai_engine")
 
@@ -322,19 +324,19 @@ def _apply_primary_pass(
     if high_energy or engagement_boost:
         visual_filters.append("scale=1112:1978:flags=lanczos")
         visual_filters.append("crop=1080:1920")
-        visual_filters.append("eq=contrast=1.06:saturation=1.07:brightness=0.02")
+        visual_filters.append("eq=contrast=1.04:saturation=1.02:brightness=0.01:gamma=1.01")
         corrections.append("visual_energy_micro_zoom")
     else:
-        visual_filters.append("eq=contrast=1.05:saturation=1.06:brightness=0.03")
-        visual_filters.append("unsharp=5:5:0.45:5:5:0.0")
+        visual_filters.append("eq=contrast=1.02:saturation=1.01:brightness=0.005:gamma=1.0")
+        visual_filters.append("unsharp=3:3:0.35")
         corrections.append("cinematic_motion_grade")
 
     if recover_dark_tone:
-        visual_filters.append("eq=contrast=1.08:saturation=1.08:brightness=0.05")
+        visual_filters.append("eq=contrast=1.04:saturation=1.03:brightness=0.02")
         corrections.append("dark_tone_recovery")
 
     if simplify_colors:
-        visual_filters.append("hue=s=0.93")
+        visual_filters.append("hue=s=0.87")
         corrections.append("simplify_palette")
 
     ass_path: Optional[Path] = None
@@ -356,6 +358,7 @@ def _apply_primary_pass(
     else:
         setpts_factor = 0.985 if high_energy else 1.0
 
+    export_profile = standard_1080x1920_profile()
     cmd: List[str] = [
         "ffmpeg",
         "-y",
@@ -364,8 +367,6 @@ def _apply_primary_pass(
         "error",
         "-i",
         str(input_path),
-        "-r",
-        "30",
     ]
 
     if has_audio:
@@ -395,16 +396,28 @@ def _apply_primary_pass(
     cmd += [
         "-c:v",
         "libx264",
+        "-profile:v",
+        export_profile.video_profile,
         "-preset",
-        "fast",
+        export_profile.video_preset,
         "-crf",
-        "18",
+        str(export_profile.crf),
         "-pix_fmt",
-        "yuv420p",
+        export_profile.pixel_format,
+        "-r",
+        str(export_profile.fps),
+        "-b:v",
+        export_profile.bitrate,
+        "-maxrate",
+        export_profile.maxrate,
+        "-bufsize",
+        export_profile.bufsize,
         "-c:a",
         "aac",
         "-b:a",
-        "192k",
+        export_profile.audio_bitrate,
+        "-ar",
+        str(export_profile.audio_sample_rate),
         "-movflags",
         "+faststart",
         str(output_path),
