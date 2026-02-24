@@ -1,0 +1,117 @@
+# Page snapshot
+
+```yaml
+- generic [active] [ref=e1]:
+  - heading "Directory listing for /" [level=1] [ref=e2]
+  - separator [ref=e3]
+  - list [ref=e4]:
+    - listitem [ref=e5]:
+      - link ".build/" [ref=e6] [cursor=pointer]:
+        - /url: .build/
+    - listitem [ref=e7]:
+      - link ".env.example" [ref=e8] [cursor=pointer]:
+        - /url: .env.example
+    - listitem [ref=e9]:
+      - link "ACCOUNTS_ARE_REAL.md" [ref=e10] [cursor=pointer]:
+        - /url: ACCOUNTS_ARE_REAL.md
+    - listitem [ref=e11]:
+      - link "app/" [ref=e12] [cursor=pointer]:
+        - /url: app/
+    - listitem [ref=e13]:
+      - link "BACKEND_FIXED.md" [ref=e14] [cursor=pointer]:
+        - /url: BACKEND_FIXED.md
+    - listitem [ref=e15]:
+      - link "backgrounds/" [ref=e16] [cursor=pointer]:
+        - /url: backgrounds/
+    - listitem [ref=e17]:
+      - link "build/" [ref=e18] [cursor=pointer]:
+        - /url: build/
+    - listitem [ref=e19]:
+      - link "build_and_install_app.sh" [ref=e20] [cursor=pointer]:
+        - /url: build_and_install_app.sh
+    - listitem [ref=e21]:
+      - link "COMPLETE_SUMMARY.md" [ref=e22] [cursor=pointer]:
+        - /url: COMPLETE_SUMMARY.md
+    - listitem [ref=e23]:
+      - link "ContentView.swift" [ref=e24] [cursor=pointer]:
+        - /url: ContentView.swift
+    - listitem [ref=e25]:
+      - link "data/" [ref=e26] [cursor=pointer]:
+        - /url: data/
+    - listitem [ref=e27]:
+      - link "e2e-tests/" [ref=e28] [cursor=pointer]:
+        - /url: e2e-tests/
+    - listitem [ref=e29]:
+      - link "example_usage.py" [ref=e30] [cursor=pointer]:
+        - /url: example_usage.py
+    - listitem [ref=e31]:
+      - link "FEATURES.md" [ref=e32] [cursor=pointer]:
+        - /url: FEATURES.md
+    - listitem [ref=e33]:
+      - link "FEATURES_TAB_FIXES.md" [ref=e34] [cursor=pointer]:
+        - /url: FEATURES_TAB_FIXES.md
+    - listitem [ref=e35]:
+      - link "FIXES_APPLIED.md" [ref=e36] [cursor=pointer]:
+        - /url: FIXES_APPLIED.md
+    - listitem [ref=e37]:
+      - link "FULL_PIPELINE_SETUP.md" [ref=e38] [cursor=pointer]:
+        - /url: FULL_PIPELINE_SETUP.md
+    - listitem [ref=e39]:
+      - link "logs/" [ref=e40] [cursor=pointer]:
+        - /url: logs/
+    - listitem [ref=e41]:
+      - link "Models/" [ref=e42] [cursor=pointer]:
+        - /url: Models/
+    - listitem [ref=e43]:
+      - link "music/" [ref=e44] [cursor=pointer]:
+        - /url: music/
+    - listitem [ref=e45]:
+      - link "NO_DEMO_BUTTONS_VERIFICATION.md" [ref=e46] [cursor=pointer]:
+        - /url: NO_DEMO_BUTTONS_VERIFICATION.md
+    - listitem [ref=e47]:
+      - link "Package.swift" [ref=e48] [cursor=pointer]:
+        - /url: Package.swift
+    - listitem [ref=e49]:
+      - link "Python/" [ref=e50] [cursor=pointer]:
+        - /url: Python/
+    - listitem [ref=e51]:
+      - link "QUALITY_ENHANCEMENTS.md" [ref=e52] [cursor=pointer]:
+        - /url: QUALITY_ENHANCEMENTS.md
+    - listitem [ref=e53]:
+      - link "QUICKSTART.md" [ref=e54] [cursor=pointer]:
+        - /url: QUICKSTART.md
+    - listitem [ref=e55]:
+      - link "Resources/" [ref=e56] [cursor=pointer]:
+        - /url: Resources/
+    - listitem [ref=e57]:
+      - link "Services/" [ref=e58] [cursor=pointer]:
+        - /url: Services/
+    - listitem [ref=e59]:
+      - link "Sources/" [ref=e60] [cursor=pointer]:
+        - /url: Sources/
+    - listitem [ref=e61]:
+      - link "SYSTEM_STATUS_VERIFIED.md" [ref=e62] [cursor=pointer]:
+        - /url: SYSTEM_STATUS_VERIFIED.md
+    - listitem [ref=e63]:
+      - link "test_features.py" [ref=e64] [cursor=pointer]:
+        - /url: test_features.py
+    - listitem [ref=e65]:
+      - link "test_fixes.py" [ref=e66] [cursor=pointer]:
+        - /url: test_fixes.py
+    - listitem [ref=e67]:
+      - link "test_full_pipeline.py" [ref=e68] [cursor=pointer]:
+        - /url: test_full_pipeline.py
+    - listitem [ref=e69]:
+      - link "TEST_RESULTS.md" [ref=e70] [cursor=pointer]:
+        - /url: TEST_RESULTS.md
+    - listitem [ref=e71]:
+      - link "TESTING_COMPLETE.md" [ref=e72] [cursor=pointer]:
+        - /url: TESTING_COMPLETE.md
+    - listitem [ref=e73]:
+      - link "TikTokUploadManagerApp.swift" [ref=e74] [cursor=pointer]:
+        - /url: TikTokUploadManagerApp.swift
+    - listitem [ref=e75]:
+      - link "ViewModels/" [ref=e76] [cursor=pointer]:
+        - /url: ViewModels/
+  - separator [ref=e77]
+```

@@ -1,0 +1,17 @@
+[
+  {
+    "name": "Chill Vibes",
+    "file": "chill_vibes.mp3",
+    "mood": "calm"
+  },
+  {
+    "name": "Upbeat Energy",
+    "file": "upbeat.mp3",
+    "mood": "energetic"
+  },
+  {
+    "name": "Lo-Fi Study",
+    "file": "lofi.mp3",
+    "mood": "focus"
+  }
+]

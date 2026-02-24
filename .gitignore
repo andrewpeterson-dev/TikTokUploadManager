@@ -1,0 +1,14 @@
+.build/
+.swiftpm/
+*.xcodeproj/project.xcworkspace/
+*.xcodeproj/xcuserdata/
+.DS_Store
+DerivedData/
+
+node_modules/
+*.db
+*.db-shm
+*.db-wal
+backgrounds/
+app/media/backgrounds/
+build/TikTokUploadManager
