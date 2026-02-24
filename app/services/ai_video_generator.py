@@ -306,6 +306,10 @@ class AIVideoGenerator:
             color_grade="clean",
             music_intensity=min(0.85, float(profile.music_intensity)),
         )
+
+        if any(issue == "clipping_or_black_screen" for issue in report.issues):
+            profile = replace(profile, motion_intensity=0.0, color_grade="clean")
+
         if report.corrections.get("motion_intensity") is not None:
             profile = replace(profile, motion_intensity=0.22)
         if report.corrections.get("music_intensity") is not None:
@@ -406,6 +410,8 @@ class AIVideoGenerator:
 
         corrected = self.apply_quality_profile(profile, report)
         if corrected == profile:
+            if "clipping_or_black_screen" in report.issues:
+                return base_video_path
             return output_path
 
         retry_name = output_path.with_name(f"{output_path.stem}_retry_{attempt + 1}.mp4")
