@@ -546,9 +546,12 @@ def command_generate_ai_video(args: argparse.Namespace) -> int:
         except Exception as exc:
             LOGGER.warning("Cinematic engine failed, falling through: %s", exc)
 
-    # Shortform optimizer (skip when style engine already did final polish).
-    if SHORTFORM_AI_ENABLED and not output_is_ai_styled:
-        progress("Running short-form AI optimization...")
+    # Shortform optimizer cleanup for all generated AI clips (including styled output).
+    if SHORTFORM_AI_ENABLED:
+        if output_is_ai_styled:
+            progress("Running short-form AI cleanup for styled output...")
+        else:
+            progress("Running short-form AI optimization...")
         video_path = optimize_shortform_video(video_path, transcript)
 
     # Create video record in database
