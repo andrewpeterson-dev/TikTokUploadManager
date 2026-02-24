@@ -10,5 +10,5 @@ node_modules/
 *.db-shm
 *.db-wal
 backgrounds/
-app/media/backgrounds/
-build/TikTokUploadManager
+app/media/
+build/
