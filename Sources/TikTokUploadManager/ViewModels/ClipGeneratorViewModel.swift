@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import Foundation
+import AVFoundation
 
 @MainActor
 final class ClipGeneratorViewModel: ObservableObject {
@@ -8,6 +9,7 @@ final class ClipGeneratorViewModel: ObservableObject {
     enum SourceMode: String, CaseIterable, Identifiable {
         case url = "URL"
         case filePath = "File Path"
+        case aiVideo = "AI Video"
 
         var id: String { rawValue }
     }
@@ -112,6 +114,89 @@ final class ClipGeneratorViewModel: ObservableObject {
         case error
     }
 
+    enum AIVideoTheme: String, CaseIterable, Identifiable {
+        case scary = "scary"
+        case dating = "dating"
+        case crazy = "crazy"
+        case mystery = "mystery"
+        case motivational = "motivational"
+        case creepy = "creepy"
+        case interesting = "interesting"
+
+        var id: String { rawValue }
+
+        var title: String {
+            switch self {
+            case .scary:
+                return "👻 Horror"
+            case .dating:
+                return "💕 Romance"
+            case .crazy:
+                return "🤯 Wild"
+            case .mystery:
+                return "🔍 Mystery"
+            case .motivational:
+                return "💪 Inspire"
+            case .creepy:
+                return "😱 Creepy"
+            case .interesting:
+                return "🌟 Facts"
+            }
+        }
+    }
+
+    enum AIVideoDuration: Int, CaseIterable, Identifiable {
+        case thirty = 30
+        case sixty = 60
+        case ninety = 90
+        case onetwenty = 120
+
+        var id: Int { rawValue }
+
+        var title: String {
+            switch self {
+            case .thirty:
+                return "⚡ 30s Quick"
+            case .sixty:
+                return "📱 60s Standard"
+            case .ninety:
+                return "📹 90s Extended"
+            case .onetwenty:
+                return "🎬 120s Long"
+            }
+        }
+    }
+
+    enum AIVideoType: String, CaseIterable, Identifiable {
+        case story = "story"
+        case commentary = "commentary"
+        case news = "news"
+
+        var id: String { rawValue }
+
+        var title: String {
+            switch self {
+            case .story:
+                return "📖 Story"
+            case .commentary:
+                return "🎙️ Commentary"
+            case .news:
+                return "📰 News"
+            }
+        }
+
+        var description: String {
+            switch self {
+            case .story:
+                return "AI-generated narrative stories"
+            case .commentary:
+                return "Commentary style videos with analysis"
+            case .news:
+                return "News-style reporting videos"
+            }
+        }
+    }
+
     struct FeedItem: Identifiable, Codable, Hashable {
         var id: UUID
         var timestamp: Date
@@ -161,11 +246,24 @@ final class ClipGeneratorViewModel: ObservableObject {
     @Published var contentTheme: ContentTheme = .story
     @Published var variationMode: VariationMode = .varied
 
-    // Enhanced features
     @Published var useSmartBackgrounds: Bool = false
     @Published var backgroundTheme: String = "scary"
     @Published var selectedAccountUsername: String = ""
     @Published var autoTrackPost: Bool = false
+    @Published var shortformAIEnabled: Bool = true
+    @Published var shortformAestheticThreshold: Int = 75
+    @Published var shortformEngagementThreshold: Int = 70
+    @Published var shortformDetectedThisRun: Bool = false
+    @Published var shortformLastAestheticScore: Int?
+    @Published var shortformLastEngagementScore: Int?
+    @Published var shortformLastValidationSource: String = "n/a"
+    @Published var shortformLastCorrections: String = "none"
+    @Published var shortformLastError: String = ""
+
+    // AI Video Generation settings
+    @Published var aiVideoTheme: AIVideoTheme = .scary
+    @Published var aiVideoDuration: AIVideoDuration = .sixty
+    @Published var aiVideoType: AIVideoType = .story
 
     @Published var isProcessing = false
     @Published var progressText = "Idle"
@@ -185,34 +283,41 @@ final class ClipGeneratorViewModel: ObservableObject {
     @Published var lastRunSummary: String = "No generation runs yet."
     @Published var lastRunAt: Date?
 
-    private let service = PythonProcessService()
+    private let generationService = PythonProcessService()
+    private let featuresService = TikTokFeaturesService()
+
     private var outputBuffer = ""
     private var didRequestStop = false
     private var sawErrorOutput = false
     private var processExitCode: Int32?
+
     private let queueStorageURL: URL
     private let historyStorageURL: URL
-    private let clipsStorageURL: URL
+    private var uploadWorkerProcess: Process?
 
     init() {
         let appSupportURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSTemporaryDirectory())
         let appDirectory = appSupportURL.appendingPathComponent("TikTokUploadManager", isDirectory: true)
+
         queueStorageURL = appDirectory.appendingPathComponent("post_queue.json")
         historyStorageURL = appDirectory.appendingPathComponent("post_history.json")
-        clipsStorageURL = appDirectory.appendingPathComponent("generated_clips.json")
 
-        // Ensure storage directory exists on init
         do {
             try FileManager.default.createDirectory(at: appDirectory, withIntermediateDirectories: true)
-            print("✅ Storage directory ready: \(appDirectory.path)")
         } catch {
-            print("⚠️ Failed to create storage directory: \(error.localizedDescription)")
+            appendFeed("Failed to create app support directory: \(error.localizedDescription)", level: .warning)
         }
 
-        loadGeneratedClips()
         loadPostState()
-        appendFeed("New UI ready. Clip Creator, Generated Clips, and Post are active.", level: .info)
+        refreshGeneratedClipsFromBackend()
+        startUploadWorker()
+
+        appendFeed("Production backend connected. Video metadata now loads from SQLite.", level: .info)
+    }
+
+    deinit {
+        uploadWorkerProcess?.terminate()
     }
 
     func pickVideoFile() {
@@ -236,12 +341,33 @@ final class ClipGeneratorViewModel: ObservableObject {
     }
 
     func generateClips() {
+        // Handle AI Video generation separately
+        if sourceMode == .aiVideo {
+            generateAIVideo()
+            return
+        }
+
         guard !videoURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             progressText = "Provide a video URL or local file path."
             runState = .failed
             progressValue = nil
             appendFeed("Generation blocked: missing source URL or file path.", level: .warning)
             return
+        }
+
+        // Validate local file path exists before processing
+        let trimmedURL = videoURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedURL.starts(with: "http://") && !trimmedURL.starts(with: "https://") {
+            // This appears to be a local file path
+            let filePath = trimmedURL.expandingTildeInPath
+            if !FileManager.default.fileExists(atPath: filePath) {
+                progressText = "Video file not found"
+                runState = .failed
+                progressValue = nil
+                appendFeed("ERROR: Video file not found at path: \(filePath)", level: .error)
+                appendFeed("TIP: Use the Browse button to select your video file instead of typing the path.", level: .warning)
+                return
+            }
         }
 
         isProcessing = true
@@ -253,6 +379,12 @@ final class ClipGeneratorViewModel: ObservableObject {
         didRequestStop = false
         sawErrorOutput = false
         processExitCode = nil
+        shortformDetectedThisRun = false
+        shortformLastAestheticScore = nil
+        shortformLastEngagementScore = nil
+        shortformLastValidationSource = "n/a"
+        shortformLastCorrections = "none"
+        shortformLastError = ""
 
         let runSummary = "format=\(clipFormat.rawValue), theme=\(contentTheme.rawValue), variation=\(variationMode.rawValue)"
         appendFeed("Generation started (\(runSummary)).", level: .info)
@@ -273,7 +405,6 @@ final class ClipGeneratorViewModel: ObservableObject {
             args += ["--run_seed", UUID().uuidString]
         }
 
-        // Enhanced features
         if useSmartBackgrounds {
             args += ["--use_smart_backgrounds", "true", "--background_theme", backgroundTheme]
         }
@@ -281,8 +412,13 @@ final class ClipGeneratorViewModel: ObservableObject {
         if autoTrackPost && !selectedAccountUsername.isEmpty {
             args += ["--auto_track", "true", "--account_username", selectedAccountUsername]
         }
+        args += [
+            "--shortform_ai", "\(shortformAIEnabled)",
+            "--aesthetic_threshold", "\(shortformAestheticThreshold)",
+            "--engagement_threshold", "\(shortformEngagementThreshold)"
+        ]
 
-        service.runScript(arguments: args) { [weak self] output in
+        generationService.runScript(arguments: args) { [weak self] output in
             self?.consumeOutput(output)
         } completion: { [weak self] in
             guard let self else { return }
@@ -317,22 +453,148 @@ final class ClipGeneratorViewModel: ObservableObject {
             self.runState = .succeeded
             self.progressValue = 1
             self.lastRunAt = Date()
-            self.lastRunSummary = "Generated \(self.generatedClips.count) clip(s) using \(self.clipFormat.title) • \(self.contentTheme.title) • \(self.variationMode.title)."
+            self.lastRunSummary = "Generated clips using \(self.clipFormat.title) • \(self.contentTheme.title) • \(self.variationMode.title)."
             if self.progressText == "Starting..." {
                 self.progressText = "Finished"
             }
             self.appendFeed(self.lastRunSummary, level: .success)
+            self.refreshGeneratedClipsFromBackend()
         }
     }
 
     func stop() {
         didRequestStop = true
-        service.stop()
+        generationService.stop()
         isProcessing = false
         runState = .stopped
         progressText = "Stopped"
         progressValue = nil
         appendFeed("Background process terminated.", level: .warning)
+    }
+
+    func generateAIVideo() {
+        // TODO: Implement AI Video backend
+        isProcessing = false
+        runState = .failed
+        progressText = "AI Video backend not implemented yet"
+        appendFeed("AI Video feature coming soon. Backend needs to be created.", level: .warning)
+    }
+
+    // TODO: Implement these when AI Video backend is ready
+    /*
+    private func handleAIVideoOutput(_ line: String) {
+        logs += line + "\n"
+        outputBuffer += line
+
+        if line.contains("PROGRESS:") {
+            let message = line.replacingOccurrences(of: "PROGRESS:", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
+            progressText = message
+        }
+
+        if line.contains("AI_VIDEO_GENERATED:") {
+            let fileName = line.replacingOccurrences(of: "AI_VIDEO_GENERATED:", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
+            appendFeed("AI video generated: \(fileName)", level: .success)
+        }
+
+        if line.contains("AI_VIDEO_JSON:") {
+            let jsonString = line.replacingOccurrences(of: "AI_VIDEO_JSON:", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
+            if let data = jsonString.data(using: .utf8),
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                handleAIVideoClipJSON(json)
+            }
+        }
+
+        if line.lowercased().contains("error") || line.lowercased().contains("failed") {
+            sawErrorOutput = true
+        }
+    }
+
+    private func handleAIVideoClipJSON(_ json: [String: Any]) {
+        guard let videoId = json["videoId"] as? Int,
+              let fileName = json["fileName"] as? String,
+              let path = json["path"] as? String,
+              let status = json["status"] as? String else {
+            return
+        }
+
+        let durationInt = (json["duration"] as? String).flatMap({ Int($0) }) ?? 0
+        let size = json["size"] as? String ?? "0 B"
+
+        let clip = Clip(
+            videoId: videoId,
+            fileName: fileName,
+            duration: durationInt,
+            size: size,
+            path: path,
+            status: status,
+            uploadStatus: nil,
+            retryCount: nil
+        )
+
+        if !generatedClips.contains(where: { $0.videoId == clip.videoId }) {
+            generatedClips.append(clip)
+        }
+    }
+
+    private func handleAIVideoExit(_ exitCode: Int32) {
+        processExitCode = exitCode
+        isProcessing = false
+
+        if didRequestStop {
+            runState = .stopped
+            progressText = "Stopped"
+            appendFeed("AI video generation stopped by user.", level: .warning)
+        } else if exitCode == 0 && !sawErrorOutput {
+            runState = .succeeded
+            progressText = "AI video generated successfully"
+            progressValue = 1.0
+            lastRunAt = Date()
+            let summary = "AI video: \(aiVideoTheme.rawValue) \(aiVideoDuration.rawValue)s \(aiVideoType.rawValue)"
+            lastRunSummary = "\(summary) at \(lastRunAt!.formatted(date: .abbreviated, time: .shortened))"
+            appendFeed("AI video generation completed successfully.", level: .success)
+
+            // Refresh clips from backend
+            Task {
+                try await Task.sleep(for: .seconds(1))
+                await MainActor.run {
+                    self.refreshGeneratedClipsFromBackend()
+                }
+            }
+        } else {
+            runState = .failed
+            progressText = "AI video generation failed"
+            progressValue = nil
+            appendFeed("AI video generation failed with exit code \(exitCode).", level: .error)
+
+            if sawErrorOutput {
+                appendFeed("Check the output log for detailed error messages.", level: .warning)
+            }
+        }
+    }
+    */
+            progressValue = 1.0
+            lastRunAt = Date()
+            let summary = "AI video: \(aiVideoTheme.rawValue) \(aiVideoDuration.rawValue)s \(aiVideoType.rawValue)"
+            lastRunSummary = "\(summary) at \(lastRunAt!.formatted(date: .abbreviated, time: .shortened))"
+            appendFeed("AI video generation completed successfully.", level: .success)
+
+            // Refresh clips from backend
+            Task {
+                try await Task.sleep(for: .seconds(1))
+                await MainActor.run {
+                    self.refreshGeneratedClipsFromBackend()
+                }
+            }
+        } else {
+            runState = .failed
+            progressText = "AI video generation failed"
+            progressValue = nil
+            appendFeed("AI video generation failed with exit code \(exitCode).", level: .error)
+
+            if sawErrorOutput {
+                appendFeed("Check the output log for detailed error messages.", level: .warning)
+            }
+        }
     }
 
     func applySuggestedCaption(for clip: Clip?) {
@@ -345,7 +607,7 @@ final class ClipGeneratorViewModel: ObservableObject {
 
         let hook = captionHook(for: contentTheme)
         var lines: [String] = [
-            "\(hook)",
+            hook,
             "\(clipFormat.title) cut from a longer video.",
             ""
         ]
@@ -384,8 +646,12 @@ final class ClipGeneratorViewModel: ObservableObject {
         postQueue.insert(item, at: 0)
         savePostState()
 
+        if let path = clip.path {
+            queueVideoBackend(path: path, caption: caption)
+        }
+
         postStatusText = "Queued \(clip.fileName) for posting."
-        appendFeed("Queued \(clip.fileName) for Post tab workflow.", level: .success)
+        appendFeed("Queued \(clip.fileName) for upload queue.", level: .success)
     }
 
     func removeQueueItem(_ item: PostQueueItem) {
@@ -443,113 +709,93 @@ final class ClipGeneratorViewModel: ObservableObject {
     }
 
     func openTikTokUploadPage(videoPath: String? = nil, caption: String? = nil) {
-        print("🚀 [TikTok Upload] Starting upload process...")
-        print("   Video: \(videoPath ?? "none")")
-        print("   Caption: \(caption ?? "none")")
-
-        // Validate video path
-        guard let videoPath = videoPath, !videoPath.isEmpty else {
+        guard let videoPath, !videoPath.isEmpty else {
             postStatusText = "No video selected for upload."
-            appendFeed("Upload failed: No video selected", level: .error)
-            print("❌ [TikTok Upload] No video path provided")
+            appendFeed("Upload failed: no video selected", level: .error)
             return
         }
 
         guard FileManager.default.fileExists(atPath: videoPath) else {
             postStatusText = "Video file not found: \(videoPath)"
-            appendFeed("Upload failed: Video file not found", level: .error)
-            print("❌ [TikTok Upload] Video file not found at: \(videoPath)")
+            appendFeed("Upload failed: video file not found", level: .error)
             return
         }
 
-        // Auto-fill TikTok upload using Python script with tiktok-uploader
-        // Try to find the script in multiple locations
-        var pythonPath: String? = nil
+        var args = [
+            "--video", videoPath,
+            "--content-theme", contentTheme.rawValue,
+            "--clip-format", clipFormat.rawValue
+        ]
 
-        // First, try the development location
-        let devPath = NSHomeDirectory() + "/TikTokUploadManager/Python/tiktok_upload_cli.py"
-        if FileManager.default.fileExists(atPath: devPath) {
-            pythonPath = devPath
-            print("✅ [TikTok Upload] Found script at: \(devPath)")
-        } else {
-            // Fall back to bundle
-            pythonPath = Bundle.main.path(forResource: "tiktok_upload_cli", ofType: "py")
-            if let path = pythonPath {
-                print("✅ [TikTok Upload] Found script in bundle: \(path)")
-            }
+        if let caption, !caption.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            args += ["--caption", caption]
         }
 
-        guard let scriptPath = pythonPath else {
-            postStatusText = "Upload script not found."
-            appendFeed("Failed to find tiktok_upload_cli.py", level: .error)
-            print("❌ [TikTok Upload] Script not found")
+        postStatusText = "Generating caption, rendering, queueing, and uploading..."
+        appendFeed("Upload pipeline started for \(URL(fileURLWithPath: videoPath).lastPathComponent)", level: .info)
+
+        runUploadScript(arguments: args) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .success(let output):
+                if output.contains("\"upload_status\": \"posted\"") {
+                    self.postStatusText = "Video posted to TikTok."
+                    self.appendFeed("TikTok upload completed.", level: .success)
+                    self.markQueueItemPostedIfMatchingPath(videoPath)
+                } else {
+                    self.postStatusText = "Upload queued or in progress."
+                    self.appendFeed("Upload queued. Worker will continue processing.", level: .info)
+                }
+                self.refreshGeneratedClipsFromBackend()
+            case .failure(let error):
+                self.postStatusText = "Upload failed"
+                self.appendFeed("Upload failed: \(error.localizedDescription)", level: .error)
+                self.refreshGeneratedClipsFromBackend()
+            }
+        }
+    }
+
+    func retryClipUpload(_ clip: Clip?) {
+        guard let clip, let path = clip.path else {
+            postStatusText = "Select a clip with a valid path to retry."
             return
         }
 
-        var args = [scriptPath, "--video", videoPath]
+        postStatusText = "Retrying upload..."
+        runUploadScript(arguments: ["--retry-video", path]) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .success:
+                self.postStatusText = "Retry submitted."
+                self.appendFeed("Retry submitted for \(clip.fileName)", level: .info)
+            case .failure(let error):
+                self.postStatusText = "Retry failed"
+                self.appendFeed("Retry failed: \(error.localizedDescription)", level: .error)
+            }
+            self.refreshGeneratedClipsFromBackend()
+        }
+    }
 
-        // Use provided caption or generate one
-        var finalCaption = caption ?? ""
-        if finalCaption.isEmpty {
-            print("ℹ️ [TikTok Upload] No caption provided, generating default caption")
-            let hook = captionHook(for: contentTheme)
-            let tags = postHashtags.trimmingCharacters(in: .whitespacesAndNewlines)
-            finalCaption = "\(hook)\n\(clipFormat.title) cut from a longer video.\n\n\(tags)"
+    func deleteClip(_ clip: Clip?) {
+        guard let clip, let path = clip.path else {
+            postStatusText = "Select a clip with a valid path to delete."
+            return
         }
 
-        args += ["--caption", finalCaption]
-
-        print("📝 [TikTok Upload] Using caption: \(finalCaption.prefix(100))...")
-
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
-        process.arguments = args
-
-        // Capture output
-        let outputPipe = Pipe()
-        let errorPipe = Pipe()
-        process.standardOutput = outputPipe
-        process.standardError = errorPipe
-
-        do {
-            try process.run()
-
-            postStatusText = "Opening TikTok upload page with auto-fill..."
-            appendFeed("Starting TikTok upload auto-fill...", level: .info)
-
-            // Read output in background
-            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                process.waitUntilExit()
-
-                let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
-                let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
-
-                let output = String(data: outputData, encoding: .utf8) ?? ""
-                let errorOutput = String(data: errorData, encoding: .utf8) ?? ""
-
-                print("📊 [TikTok Upload] Process completed with status: \(process.terminationStatus)")
-                if !output.isEmpty {
-                    print("   Output: \(output)")
-                }
-                if !errorOutput.isEmpty {
-                    print("   Error: \(errorOutput)")
-                }
-
-                DispatchQueue.main.async {
-                    if process.terminationStatus == 0 {
-                        self?.postStatusText = "TikTok upload page opened and auto-filled successfully."
-                        self?.appendFeed("TikTok upload auto-fill completed.", level: .success)
-                    } else {
-                        let message = !errorOutput.isEmpty ? errorOutput : (!output.isEmpty ? output : "Upload process failed")
-                        self?.postStatusText = "Upload auto-fill failed"
-                        self?.appendFeed("Upload failed: \(message)", level: .error)
-                    }
-                }
+        postStatusText = "Deleting clip..."
+        runUploadScript(arguments: ["--delete-video", path]) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .success:
+                self.postStatusText = "Deleted \(clip.fileName)."
+                self.appendFeed("Deleted \(clip.fileName)", level: .warning)
+                self.postQueue.removeAll { $0.clipPath == path }
+                self.savePostState()
+            case .failure(let error):
+                self.postStatusText = "Delete failed"
+                self.appendFeed("Delete failed: \(error.localizedDescription)", level: .error)
             }
-        } catch {
-            postStatusText = "Failed to run upload script: \(error.localizedDescription)"
-            appendFeed("Failed to run upload script: \(error.localizedDescription)", level: .error)
-            print("❌ [TikTok Upload] Failed to start process: \(error.localizedDescription)")
+            self.refreshGeneratedClipsFromBackend()
         }
     }
 
@@ -583,6 +829,34 @@ final class ClipGeneratorViewModel: ObservableObject {
         postStatusText = "Opened \(item.clipFileName)."
     }
 
+    func refreshGeneratedClipsFromBackend() {
+        featuresService.listVideos { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .success(let records):
+                self.generatedClips = records.map { record in
+                    let path = record.path
+                    let size = self.fileSizeLabel(for: path)
+                    return Clip(
+                        videoId: record.id,
+                        fileName: record.filename,
+                        duration: self.estimatedDuration(from: path),
+                        size: size,
+                        path: path,
+                        status: record.status,
+                        uploadStatus: record.uploadStatus,
+                        retryCount: record.retryCount
+                    )
+                }
+                if self.generatedClips.count == 1 && self.postCaptionDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    self.applySuggestedCaption(for: self.generatedClips[0])
+                }
+            case .failure(let error):
+                self.appendFeed("Failed to refresh video library: \(error.localizedDescription)", level: .warning)
+            }
+        }
+    }
+
     private func consumeOutput(_ output: String) {
         logs += output
         outputBuffer += output
@@ -609,7 +883,8 @@ final class ClipGeneratorViewModel: ObservableObject {
                 .trimmingCharacters(in: .whitespaces)
             let clip = Clip(fileName: payload.isEmpty ? "Clip \(generatedClips.count + 1)" : payload,
                             duration: clipDuration,
-                            size: "—")
+                            size: "—",
+                            status: "ready")
             upsertClip(clip)
             progressText = "Generated \(clip.fileName)"
             return
@@ -638,6 +913,10 @@ final class ClipGeneratorViewModel: ObservableObject {
             return
         }
 
+        if trimmed.contains("shortform ") {
+            parseShortformLog(trimmed)
+        }
+
         progressText = trimmed
 
         if let (step, total) = parseStep(from: trimmed), total > 0 {
@@ -651,7 +930,6 @@ final class ClipGeneratorViewModel: ObservableObject {
     }
 
     private func parseStep(from line: String) -> (Int, Int)? {
-        // Matches strings like "Step 2/5: Creating clips..."
         guard let range = line.range(of: #"Step\s+(\d+)\s*/\s*(\d+)"#, options: .regularExpression) else {
             return nil
         }
@@ -662,19 +940,85 @@ final class ClipGeneratorViewModel: ObservableObject {
         return (numbers[0], numbers[1])
     }
 
+    private func parseShortformLog(_ line: String) {
+        shortformDetectedThisRun = true
+
+        if line.contains("shortform optimization failed") {
+            shortformLastError = line
+            appendFeed("Shortform AI failed; fallback to original render.", level: .warning)
+            return
+        }
+
+        if line.contains("shortform AI validation failed") {
+            shortformLastError = line
+            appendFeed("Shortform AI API unavailable; local validation fallback used.", level: .warning)
+            return
+        }
+
+        if line.contains("shortform corrections applied="),
+           let range = line.range(of: "shortform corrections applied=") {
+            shortformLastCorrections = String(line[range.upperBound...]).trimmingCharacters(in: .whitespaces)
+            return
+        }
+
+        guard line.contains("shortform validation source=") else {
+            return
+        }
+
+        let source = extractCapture(from: line, pattern: #"source=([a-zA-Z_]+)"#, group: 1) ?? "unknown"
+        let aesthetic = Int(extractCapture(from: line, pattern: #"aesthetic_score=(\d+)"#, group: 1) ?? "")
+        let engagement = Int(extractCapture(from: line, pattern: #"engagement_score=(\d+)"#, group: 1) ?? "")
+
+        shortformLastValidationSource = source
+        shortformLastAestheticScore = aesthetic
+        shortformLastEngagementScore = engagement
+
+        if let aesthetic, let engagement {
+            let level: FeedLevel = (aesthetic >= shortformAestheticThreshold && engagement >= shortformEngagementThreshold) ? .success : .warning
+            appendFeed(
+                "Shortform AI score A\(aesthetic) E\(engagement) (\(source)).",
+                level: level
+            )
+        }
+    }
+
+    private func extractCapture(from input: String, pattern: String, group: Int) -> String? {
+        guard let regex = try? NSRegularExpression(pattern: pattern) else {
+            return nil
+        }
+        let range = NSRange(input.startIndex..<input.endIndex, in: input)
+        guard let match = regex.firstMatch(in: input, options: [], range: range),
+              match.numberOfRanges > group,
+              let valueRange = Range(match.range(at: group), in: input) else {
+            return nil
+        }
+        return String(input[valueRange])
+    }
+
     private func parseClipJSON(_ line: String) {
         let jsonString = line.replacingOccurrences(of: "CLIP_JSON:", with: "")
             .trimmingCharacters(in: .whitespaces)
 
-        guard let data = jsonString.data(using: .utf8) else { return }
-        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+        guard let data = jsonString.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
 
         let fileName = object["fileName"] as? String ?? "Clip \(generatedClips.count + 1)"
         let duration = object["duration"] as? Int ?? clipDuration
         let size = object["size"] as? String ?? "—"
         let path = object["path"] as? String
+        let status = object["status"] as? String ?? "ready"
+        let videoId = object["videoId"] as? Int
 
-        upsertClip(Clip(fileName: fileName, duration: duration, size: size, path: path))
+        upsertClip(
+            Clip(
+                videoId: videoId,
+                fileName: fileName,
+                duration: duration,
+                size: size,
+                path: path,
+                status: status
+            )
+        )
     }
 
     private func parseExitCode(from line: String) -> Int32? {
@@ -689,13 +1033,11 @@ final class ClipGeneratorViewModel: ObservableObject {
     }
 
     private func upsertClip(_ clip: Clip) {
-        if let index = generatedClips.firstIndex(where: { $0.fileName == clip.fileName }) {
+        if let index = generatedClips.firstIndex(where: { ($0.path ?? $0.fileName) == (clip.path ?? clip.fileName) }) {
             generatedClips[index] = clip
         } else {
             generatedClips.append(clip)
         }
-
-        saveGeneratedClips()
 
         if generatedClips.count == 1 {
             applySuggestedCaption(for: clip)
@@ -765,64 +1107,159 @@ final class ClipGeneratorViewModel: ObservableObject {
         }
     }
 
-    private func loadGeneratedClips() {
-        do {
-            try ensureStorageDirectoryExists()
-        } catch {
-            print("⚠️ Failed to create app support directory: \(error.localizedDescription)")
-            appendFeed("Failed to create app support directory: \(error.localizedDescription)", level: .warning)
-            return
-        }
-
-        let decoder = JSONDecoder()
-
-        guard FileManager.default.fileExists(atPath: clipsStorageURL.path) else {
-            print("ℹ️ No saved clips file found at \(clipsStorageURL.path)")
-            return
-        }
-
-        guard let data = try? Data(contentsOf: clipsStorageURL),
-              let decodedClips = try? decoder.decode([Clip].self, from: data) else {
-            print("⚠️ Failed to decode clips from \(clipsStorageURL.path)")
-            return
-        }
-
-        generatedClips = decodedClips
-        print("✅ Loaded \(generatedClips.count) clips from storage")
-
-        // Verify paths still exist and update status
-        let validClips = generatedClips.filter { clip in
-            guard let path = clip.path else { return false }
-            return FileManager.default.fileExists(atPath: path)
-        }
-
-        if validClips.count < generatedClips.count {
-            print("⚠️ \(generatedClips.count - validClips.count) clips have missing video files")
-            appendFeed("Some saved clips have missing video files", level: .warning)
-        }
-    }
-
-    private func saveGeneratedClips() {
-        do {
-            try ensureStorageDirectoryExists()
-
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            let clipsData = try encoder.encode(generatedClips)
-            try clipsData.write(to: clipsStorageURL, options: .atomic)
-
-            print("✅ Saved \(generatedClips.count) clips to \(clipsStorageURL.path)")
-        } catch {
-            print("❌ Failed to save generated clips: \(error.localizedDescription)")
-            print("   Target path: \(clipsStorageURL.path)")
-            appendFeed("Failed to save generated clips: \(error.localizedDescription)", level: .warning)
-        }
-    }
-
     private func ensureStorageDirectoryExists() throws {
         try FileManager.default.createDirectory(
             at: queueStorageURL.deletingLastPathComponent(),
             withIntermediateDirectories: true
         )
+    }
+
+    private func queueVideoBackend(path: String, caption: String) {
+        var args = [
+            "--video", path,
+            "--queue-only",
+            "--content-theme", contentTheme.rawValue,
+            "--clip-format", clipFormat.rawValue
+        ]
+
+        if !caption.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            args += ["--caption", caption]
+        }
+
+        runUploadScript(arguments: args) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .success:
+                self.refreshGeneratedClipsFromBackend()
+            case .failure(let error):
+                self.appendFeed("Failed to enqueue upload: \(error.localizedDescription)", level: .warning)
+            }
+        }
+    }
+
+    private func markQueueItemPostedIfMatchingPath(_ path: String) {
+        guard let item = postQueue.first(where: { $0.clipPath == path }) else { return }
+        markQueueItemPosted(item)
+    }
+
+    private func runUploadScript(arguments: [String], completion: @escaping (Result<String, Error>) -> Void) {
+        guard let scriptPath = Self.uploadScriptPath() else {
+            completion(.failure(NSError(
+                domain: "TikTokUpload",
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "Upload script not found"]
+            )))
+            return
+        }
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+            process.arguments = [scriptPath] + arguments
+
+            let outputPipe = Pipe()
+            let errorPipe = Pipe()
+            process.standardOutput = outputPipe
+            process.standardError = errorPipe
+
+            do {
+                try process.run()
+                process.waitUntilExit()
+
+                let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
+                let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
+
+                let output = String(data: outputData, encoding: .utf8) ?? ""
+                let errorOutput = String(data: errorData, encoding: .utf8) ?? ""
+                let combined = [output, errorOutput].joined(separator: "\n")
+
+                DispatchQueue.main.async {
+                    if process.terminationStatus == 0 {
+                        completion(.success(combined))
+                    } else {
+                        completion(.failure(NSError(
+                            domain: "TikTokUpload",
+                            code: Int(process.terminationStatus),
+                            userInfo: [NSLocalizedDescriptionKey: combined.isEmpty ? "Upload process failed" : combined]
+                        )))
+                    }
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    completion(.failure(error))
+                }
+            }
+        }
+    }
+
+    private func startUploadWorker() {
+        guard uploadWorkerProcess == nil else { return }
+        guard let scriptPath = Self.uploadScriptPath() else {
+            appendFeed("Upload worker script missing; queue resume disabled.", level: .warning)
+            return
+        }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        process.arguments = [scriptPath, "--worker"]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+
+        do {
+            try process.run()
+            uploadWorkerProcess = process
+            appendFeed("Upload worker started. Queue resumes automatically on restart.", level: .info)
+        } catch {
+            appendFeed("Failed to start upload worker: \(error.localizedDescription)", level: .warning)
+        }
+    }
+
+    private static func uploadScriptPath() -> String? {
+        let devPath = NSHomeDirectory() + "/TikTokUploadManager/Python/tiktok_upload_cli.py"
+        if FileManager.default.fileExists(atPath: devPath) {
+            return devPath
+        }
+
+        if let bundledPath = Bundle.main.path(forResource: "tiktok_upload_cli", ofType: "py") {
+            return bundledPath
+        }
+
+        return nil
+    }
+
+    private func fileSizeLabel(for path: String?) -> String {
+        guard let path, FileManager.default.fileExists(atPath: path),
+              let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+              let bytes = attrs[.size] as? Int64 else {
+            return "—"
+        }
+
+        let size = Double(bytes)
+        if size < 1024 {
+            return "\(Int(size)) B"
+        }
+        let kb = size / 1024
+        if kb < 1024 {
+            return String(format: "%.1f KB", kb)
+        }
+        let mb = kb / 1024
+        if mb < 1024 {
+            return String(format: "%.1f MB", mb)
+        }
+        return String(format: "%.2f GB", mb / 1024)
+    }
+
+    private func estimatedDuration(from path: String?) -> Int {
+        guard let path,
+              FileManager.default.fileExists(atPath: path) else {
+            return clipDuration
+        }
+
+        let asset = AVURLAsset(url: URL(fileURLWithPath: path))
+        let seconds = CMTimeGetSeconds(asset.duration)
+        if seconds.isFinite && seconds > 0 {
+            return Int(seconds.rounded())
+        }
+        return clipDuration
     }
 }

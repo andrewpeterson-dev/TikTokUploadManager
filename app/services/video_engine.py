@@ -12,6 +12,14 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional
 from urllib.parse import urlparse
 
+try:
+    from .shortform_ai_engine import SHORTFORM_AI_ENABLED, optimize_shortform_video
+except Exception:  # pragma: no cover - fallback keeps pipeline safe if module import fails
+    SHORTFORM_AI_ENABLED = False
+
+    def optimize_shortform_video(video_path: str, transcript: str) -> str:
+        return video_path
+
 from .storage import AppStorage
 
 LOGGER = logging.getLogger("tiktok_manager.video_engine")
@@ -336,6 +344,14 @@ Dialogue: 0,0:00:00.00,{self._format_ass_timestamp(duration_seconds)},Caption,,0
         if ass_file and ass_file.exists():
             ass_file.unlink(missing_ok=True)
 
+        if not SHORTFORM_AI_ENABLED:
+            return output_path
+
+        # Short-form optimizer is fail-safe by design; on failure it returns the original path.
+        transcript = caption or ""
+        enhanced_path = Path(optimize_shortform_video(str(output_path), transcript)).resolve()
+        if enhanced_path.exists():
+            return enhanced_path
         return output_path
 
     def _extract_segment(self, *, source_path: Path, start_time: float, duration: int, output_path: Path) -> Path:
@@ -429,7 +445,7 @@ Dialogue: 0,0:00:00.00,{self._format_ass_timestamp(duration_seconds)},Caption,,0
                 progress_callback(f"Step 4/6: Rendering clip {index}/{len(starts)} to 9:16...")
 
             rendered_path = self.storage.videos_dir / f"{clip_stem}.mp4"
-            self.render_vertical(
+            final_rendered_path = self.render_vertical(
                 source_path=segment_path,
                 output_path=rendered_path,
                 caption=None,
@@ -439,10 +455,10 @@ Dialogue: 0,0:00:00.00,{self._format_ass_timestamp(duration_seconds)},Caption,,0
 
             generated.append(
                 GeneratedClip(
-                    filename=rendered_path.name,
-                    path=str(rendered_path),
+                    filename=final_rendered_path.name,
+                    path=str(final_rendered_path),
                     duration=int(min(clip_duration, max(1, math.ceil(duration_seconds - start_time)))),
-                    size_bytes=int(rendered_path.stat().st_size),
+                    size_bytes=int(final_rendered_path.stat().st_size),
                 )
             )
 
@@ -462,5 +478,4 @@ Dialogue: 0,0:00:00.00,{self._format_ass_timestamp(duration_seconds)},Caption,,0
         stem = source_path.stem
         filename = output_filename or f"{stem}_post.mp4"
         output_path = self.storage.exports_dir / filename
-        self.render_vertical(source_path=source_path, output_path=output_path, caption=caption)
-        return output_path
+        return self.render_vertical(source_path=source_path, output_path=output_path, caption=caption)

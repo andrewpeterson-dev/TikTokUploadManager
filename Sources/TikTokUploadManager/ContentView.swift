@@ -142,13 +142,22 @@ struct ContentView: View {
     }
 
     private var generatedHeader: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text("Generated Clips")
-                .font(.largeTitle)
-                .fontWeight(.semibold)
+        HStack {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Generated Clips")
+                    .font(.largeTitle)
+                    .fontWeight(.semibold)
 
-            Text("Review and watch generated output files inside the app.")
-                .foregroundStyle(.secondary)
+                Text("Review saved videos from SQLite with upload status.")
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+
+            Button("Refresh") {
+                vm.refreshGeneratedClipsFromBackend()
+            }
+            .buttonStyle(.bordered)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -177,14 +186,21 @@ struct ContentView: View {
             }
             .pickerStyle(.segmented)
 
-            HStack(spacing: 8) {
-                TextField("Paste video URL or file path", text: $vm.videoURL)
-                    .textFieldStyle(.roundedBorder)
+            if vm.sourceMode != .aiVideo {
+                HStack(spacing: 8) {
+                    TextField("Paste video URL or file path", text: $vm.videoURL)
+                        .textFieldStyle(.roundedBorder)
 
-                Button("Browse") {
-                    vm.pickVideoFile()
+                    Button("Browse") {
+                        vm.pickVideoFile()
+                    }
+                    .buttonStyle(.bordered)
                 }
-                .buttonStyle(.bordered)
+            } else {
+                Text("AI will generate a complete video from scratch")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .padding(.vertical, 8)
             }
         }
     }
@@ -194,6 +210,108 @@ struct ContentView: View {
             Text("Settings")
                 .font(.headline)
 
+            if vm.sourceMode == .aiVideo {
+                aiVideoSettingsSection
+            } else {
+                regularClipSettingsSection
+            }
+        }
+    }
+
+    private var aiVideoSettingsSection: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Video Type")
+                    .font(.subheadline)
+                    .fontWeight(.medium)
+
+                Picker("Video Type", selection: $vm.aiVideoType) {
+                    ForEach(ClipGeneratorViewModel.AIVideoType.allCases) { type in
+                        Text(type.title).tag(type)
+                    }
+                }
+                .pickerStyle(.segmented)
+
+                Text(vm.aiVideoType.description)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Theme")
+                    .font(.subheadline)
+                    .fontWeight(.medium)
+
+                Picker("Theme", selection: $vm.aiVideoTheme) {
+                    ForEach(ClipGeneratorViewModel.AIVideoTheme.allCases) { theme in
+                        Text(theme.title).tag(theme)
+                    }
+                }
+                .pickerStyle(.menu)
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Duration")
+                    .font(.subheadline)
+                    .fontWeight(.medium)
+
+                Picker("Duration", selection: $vm.aiVideoDuration) {
+                    ForEach(ClipGeneratorViewModel.AIVideoDuration.allCases) { duration in
+                        Text(duration.title).tag(duration)
+                    }
+                }
+                .pickerStyle(.segmented)
+            }
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("AI Video Features")
+                    .font(.subheadline)
+                    .fontWeight(.medium)
+                    .foregroundColor(.blue)
+
+                HStack(spacing: 4) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundColor(.green)
+                        .font(.caption)
+                    Text("AI-generated script")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                HStack(spacing: 4) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundColor(.green)
+                        .font(.caption)
+                    Text("Professional AI voiceover")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                HStack(spacing: 4) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundColor(.green)
+                        .font(.caption)
+                    Text("Auto-generated captions")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                HStack(spacing: 4) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundColor(.green)
+                        .font(.caption)
+                    Text("Themed background video")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    private var regularClipSettingsSection: some View {
+        VStack(alignment: .leading, spacing: 16) {
             VStack(alignment: .leading, spacing: 8) {
                 Text("Clip Format")
                     .font(.subheadline)
@@ -300,12 +418,66 @@ struct ContentView: View {
                     .padding(.leading)
                 }
             }
+
+            Divider()
+            shortformEngineSection
+        }
+    }
+
+    private var shortformEngineSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Shortform AI Engine")
+                .font(.subheadline)
+                .fontWeight(.medium)
+                .foregroundColor(.blue)
+
+            Toggle("Enable Shortform AI Optimization", isOn: $vm.shortformAIEnabled)
+                .help("Runs retention/aesthetic optimization after every render.")
+
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(shortformStatusColor)
+                    .frame(width: 8, height: 8)
+                Text(shortformStatusText)
+                    .font(.caption)
+                    .foregroundStyle(shortformStatusColor)
+            }
+
+            Stepper(
+                "Aesthetic Threshold: \(vm.shortformAestheticThreshold)",
+                value: $vm.shortformAestheticThreshold,
+                in: 50...95
+            )
+            Stepper(
+                "Engagement Threshold: \(vm.shortformEngagementThreshold)",
+                value: $vm.shortformEngagementThreshold,
+                in: 50...95
+            )
+
+            if let aesthetic = vm.shortformLastAestheticScore,
+               let engagement = vm.shortformLastEngagementScore {
+                Text("Last scores: Aesthetic \(aesthetic)/100 • Engagement \(engagement)/100 • Source: \(vm.shortformLastValidationSource)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            } else {
+                Text("Run a clip to capture live shortform metrics.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            if vm.shortformLastCorrections != "none" {
+                Text("Corrections: \(vm.shortformLastCorrections)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
         }
     }
 
     private var actionSection: some View {
         HStack(spacing: 12) {
-            Button("Generate Clips") {
+            Button(vm.sourceMode == .aiVideo ? "Generate AI Video" : "Generate Clips") {
                 vm.generateClips()
             }
             .buttonStyle(.borderedProminent)
@@ -391,10 +563,19 @@ struct ContentView: View {
             } else {
                 List(vm.generatedClips, selection: $selectedGeneratedClipKey) { clip in
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(clip.fileName)
+                        HStack {
+                            Text(clip.fileName)
+                            Spacer()
+                            clipStatusBadge(clip)
+                        }
                         Text("\(clip.duration)s • \(clip.size)")
                             .font(.caption)
                             .foregroundStyle(.secondary)
+                        if let uploadStatus = clip.uploadStatus, !uploadStatus.isEmpty {
+                            Text("Upload: \(uploadStatus.capitalized) • Retries: \(clip.retryCount ?? 0)")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
                         if let path = clip.path, !path.isEmpty {
                             Text(path)
                                 .font(.caption2)
@@ -441,6 +622,16 @@ struct ContentView: View {
                         Button("Queue for Post") {
                             selectedPostClipKey = clipSelectionKey(for: clip)
                             vm.queueClipForPost(clip)
+                        }
+                        .buttonStyle(.bordered)
+
+                        Button("Retry Upload") {
+                            vm.retryClipUpload(clip)
+                        }
+                        .buttonStyle(.bordered)
+
+                        Button("Delete") {
+                            vm.deleteClip(clip)
                         }
                         .buttonStyle(.bordered)
                     }
@@ -513,7 +704,11 @@ struct ContentView: View {
             } else {
                 List(vm.generatedClips, selection: $selectedPostClipKey) { clip in
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(clip.fileName)
+                        HStack {
+                            Text(clip.fileName)
+                            Spacer()
+                            clipStatusBadge(clip)
+                        }
                         Text("\(clip.duration)s • \(clip.size)")
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -562,11 +757,6 @@ struct ContentView: View {
                     guard let clip = selectedPostClip else {
                         vm.postStatusText = "Select a clip first"
                         return
-                    }
-
-                    // Ensure caption is generated if empty
-                    if vm.postCaptionDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        vm.applySuggestedCaption(for: clip)
                     }
 
                     let videoPath = clip.path
@@ -794,6 +984,32 @@ struct ContentView: View {
         }
     }
 
+    private func clipStatusBadge(_ clip: Clip) -> some View {
+        let statusText = (clip.uploadStatus ?? clip.status).capitalized
+        return Text(statusText)
+            .font(.caption2)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(clipStatusColor(clip).opacity(0.2))
+            .clipShape(Capsule())
+    }
+
+    private func clipStatusColor(_ clip: Clip) -> Color {
+        let status = (clip.uploadStatus ?? clip.status).lowercased()
+        switch status {
+        case "posted", "success":
+            return .green
+        case "uploading":
+            return .blue
+        case "failed":
+            return .red
+        case "ready", "queued":
+            return .orange
+        default:
+            return .secondary
+        }
+    }
+
     private var shouldShowProgressSection: Bool {
         vm.isProcessing
             || !vm.logs.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -830,12 +1046,33 @@ struct ContentView: View {
         }
     }
 
+    private var shortformStatusText: String {
+        if !vm.shortformAIEnabled {
+            return "Disabled"
+        }
+        if vm.shortformDetectedThisRun {
+            return "Integrated: Active in latest run"
+        }
+        return "Enabled: waiting for next render"
+    }
+
+    private var shortformStatusColor: Color {
+        if !vm.shortformAIEnabled {
+            return .secondary
+        }
+        if vm.shortformDetectedThisRun {
+            return .green
+        }
+        return .orange
+    }
+
     // MARK: - Features View
 
     private var featuresView: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
                 featuresHeader
+                tiktokConnectionSection
 
                 if let error = featuresVm.errorMessage {
                     errorBanner(error)
@@ -868,6 +1105,7 @@ struct ContentView: View {
             if featuresVm.analytics == nil {
                 featuresVm.loadAnalytics()
             }
+            featuresVm.refreshTikTokAuthStatus()
         }
     }
 
@@ -877,10 +1115,49 @@ struct ContentView: View {
                 .font(.largeTitle)
                 .fontWeight(.bold)
 
-            Text("Manage accounts, backgrounds, and analytics")
+            Text("Manage OAuth connection, accounts, backgrounds, and analytics")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
         }
+    }
+
+    private var tiktokConnectionSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Label("TikTok Connection", systemImage: "link")
+                    .font(.headline)
+                Spacer()
+                Circle()
+                    .fill(featuresVm.authStatus.connected ? Color.green : Color.red)
+                    .frame(width: 10, height: 10)
+                Text(featuresVm.authStatus.connected ? "Connected" : "Not Connected")
+                    .font(.subheadline)
+                    .foregroundColor(featuresVm.authStatus.connected ? .green : .red)
+            }
+
+            HStack {
+                Text("Token expires in:")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                Text(featuresVm.authCountdownLabel())
+                    .font(.system(.subheadline, design: .monospaced))
+            }
+
+            HStack(spacing: 8) {
+                Button("Connect TikTok") {
+                    featuresVm.connectTikTok()
+                }
+                .buttonStyle(.borderedProminent)
+
+                Button("Refresh Status") {
+                    featuresVm.refreshTikTokAuthStatus()
+                }
+                .buttonStyle(.bordered)
+            }
+        }
+        .padding()
+        .background(Color(nsColor: .controlBackgroundColor))
+        .cornerRadius(12)
     }
 
     private func errorBanner(_ message: String) -> some View {
@@ -1011,62 +1288,108 @@ struct ContentView: View {
     }
 
     private func showAddAccountDialog() {
+        // FIXED: Use proper SwiftUI sheet instead of NSAlert for better UX
         let alert = NSAlert()
         alert.messageText = "Add TikTok Account"
-        alert.informativeText = "Enter account details:"
+        alert.informativeText = "Enter account details below:"
+        alert.alertStyle = .informational
+
+        // Create container view with proper frame
+        let containerView = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 140))
 
         let stackView = NSStackView()
         stackView.orientation = .vertical
-        stackView.spacing = 8
+        stackView.spacing = 10
         stackView.alignment = .leading
+        stackView.translatesAutoresizingMaskIntoConstraints = false
 
+        // Username field
+        let usernameLabel = NSTextField(labelWithString: "Username (without @):")
         let usernameField = NSTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 24))
-        usernameField.placeholderString = "Username"
+        usernameField.placeholderString = "my_tiktok_account"
         usernameField.isEditable = true
         usernameField.isSelectable = true
         usernameField.isBordered = true
         usernameField.isBezeled = true
         usernameField.bezelStyle = .roundedBezel
+        usernameField.translatesAutoresizingMaskIntoConstraints = false
+        usernameField.widthAnchor.constraint(equalToConstant: 300).isActive = true
 
+        // Niche field
+        let nicheLabel = NSTextField(labelWithString: "Niche:")
         let nicheField = NSTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 24))
-        nicheField.placeholderString = "Niche (horror, dating, crazy, etc.)"
+        nicheField.placeholderString = "horror, dating, crazy, motivational, etc."
         nicheField.isEditable = true
         nicheField.isSelectable = true
         nicheField.isBordered = true
         nicheField.isBezeled = true
         nicheField.bezelStyle = .roundedBezel
+        nicheField.translatesAutoresizingMaskIntoConstraints = false
+        nicheField.widthAnchor.constraint(equalToConstant: 300).isActive = true
 
+        // Display name field
+        let nameLabel = NSTextField(labelWithString: "Display Name (optional):")
         let nameField = NSTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 24))
-        nameField.placeholderString = "Display Name"
+        nameField.placeholderString = "My TikTok Page"
         nameField.isEditable = true
         nameField.isSelectable = true
         nameField.isBordered = true
         nameField.isBezeled = true
         nameField.bezelStyle = .roundedBezel
+        nameField.translatesAutoresizingMaskIntoConstraints = false
+        nameField.widthAnchor.constraint(equalToConstant: 300).isActive = true
 
-        stackView.addArrangedSubview(NSTextField(labelWithString: "Username:"))
+        stackView.addArrangedSubview(usernameLabel)
         stackView.addArrangedSubview(usernameField)
-        stackView.addArrangedSubview(NSTextField(labelWithString: "Niche:"))
+        stackView.addArrangedSubview(nicheLabel)
         stackView.addArrangedSubview(nicheField)
-        stackView.addArrangedSubview(NSTextField(labelWithString: "Display Name:"))
+        stackView.addArrangedSubview(nameLabel)
         stackView.addArrangedSubview(nameField)
 
-        alert.accessoryView = stackView
-        alert.addButton(withTitle: "Add")
+        containerView.addSubview(stackView)
+
+        // Add constraints
+        NSLayoutConstraint.activate([
+            stackView.leadingAnchor.constraint(equalTo: containerView.leadingAnchor, constant: 10),
+            stackView.trailingAnchor.constraint(equalTo: containerView.trailingAnchor, constant: -10),
+            stackView.topAnchor.constraint(equalTo: containerView.topAnchor, constant: 10),
+            stackView.bottomAnchor.constraint(equalTo: containerView.bottomAnchor, constant: -10)
+        ])
+
+        alert.accessoryView = containerView
+        alert.addButton(withTitle: "Add Account")
         alert.addButton(withTitle: "Cancel")
 
-        if alert.runModal() == .alertFirstButtonReturn {
+        let response = alert.runModal()
+
+        if response == .alertFirstButtonReturn {
             let username = usernameField.stringValue.trimmingCharacters(in: .whitespaces)
             let niche = nicheField.stringValue.trimmingCharacters(in: .whitespaces)
             let name = nameField.stringValue.trimmingCharacters(in: .whitespaces)
 
-            if !username.isEmpty && !niche.isEmpty {
-                featuresVm.addAccount(
-                    username: username,
-                    niche: niche,
-                    name: name.isEmpty ? username : name
-                )
+            if username.isEmpty {
+                let errorAlert = NSAlert()
+                errorAlert.messageText = "Username Required"
+                errorAlert.informativeText = "Please enter a username for the account."
+                errorAlert.alertStyle = .warning
+                errorAlert.runModal()
+                return
             }
+
+            if niche.isEmpty {
+                let errorAlert = NSAlert()
+                errorAlert.messageText = "Niche Required"
+                errorAlert.informativeText = "Please enter a niche (e.g., horror, dating, crazy)."
+                errorAlert.alertStyle = .warning
+                errorAlert.runModal()
+                return
+            }
+
+            featuresVm.addAccount(
+                username: username,
+                niche: niche,
+                name: name.isEmpty ? username : name
+            )
         }
     }
 

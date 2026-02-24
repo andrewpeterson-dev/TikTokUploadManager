@@ -1,10 +1,10 @@
 import Foundation
 
-/// Service for interacting with enhanced TikTok features (backgrounds, accounts, analytics)
 final class TikTokFeaturesService {
 
     private let pythonExecutableURL: URL
     private let featuresScriptURL: URL
+    private let uploadScriptURL: URL
 
     enum Feature {
         case status
@@ -31,11 +31,11 @@ final class TikTokFeaturesService {
             case .addAccount(let username, let niche, let name):
                 args += ["--username", username, "--niche", niche, "--name", name]
             case .listAccounts(let niche):
-                if let niche = niche {
+                if let niche {
                     args += ["--niche", niche]
                 }
             case .analytics(let username):
-                if let username = username {
+                if let username {
                     args += ["--username", username]
                 }
             default:
@@ -76,19 +76,58 @@ final class TikTokFeaturesService {
         let followerGrowth: Int?
     }
 
-    init(pythonExecutableURL: URL? = nil, featuresScriptURL: URL? = nil) {
-        self.pythonExecutableURL = pythonExecutableURL ?? Self.defaultPythonExecutableURL()
-        self.featuresScriptURL = featuresScriptURL ?? Self.defaultFeaturesScriptURL()
+    struct AuthStatus: Codable {
+        let connected: Bool
+        let expiresAt: String?
+        let secondsRemaining: Int
+        let scope: String?
     }
 
-    // MARK: - Main API Methods
+    struct VideoRecord: Identifiable, Codable {
+        let id: Int
+        let filename: String
+        let sourcePath: String?
+        let exportPath: String?
+        let caption: String?
+        let status: String
+        let createdAt: String
+        let uploadId: Int?
+        let uploadStatus: String?
+        let retryCount: Int?
+        let lastAttempt: String?
+        let errorMessage: String?
+
+        var path: String? {
+            if let exportPath, !exportPath.isEmpty {
+                return exportPath
+            }
+            return sourcePath
+        }
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case filename
+            case sourcePath = "source_path"
+            case exportPath = "export_path"
+            case caption
+            case status
+            case createdAt = "created_at"
+            case uploadId = "upload_id"
+            case uploadStatus = "upload_status"
+            case retryCount = "retry_count"
+            case lastAttempt = "last_attempt"
+            case errorMessage = "error_message"
+        }
+    }
+
+    init(pythonExecutableURL: URL? = nil, featuresScriptURL: URL? = nil, uploadScriptURL: URL? = nil) {
+        self.pythonExecutableURL = pythonExecutableURL ?? Self.defaultPythonExecutableURL()
+        self.featuresScriptURL = featuresScriptURL ?? Self.defaultFeaturesScriptURL()
+        self.uploadScriptURL = uploadScriptURL ?? Self.defaultUploadScriptURL()
+    }
 
     func getStatus(completion: @escaping (Result<String, Error>) -> Void) {
-        runFeature(.status) { result in
-            DispatchQueue.main.async {
-                completion(result)
-            }
-        }
+        runFeature(.status, completion: completion)
     }
 
     func listBackgrounds(completion: @escaping (Result<[BackgroundInfo], Error>) -> Void) {
@@ -96,9 +135,7 @@ final class TikTokFeaturesService {
             DispatchQueue.main.async {
                 switch result {
                 case .success(let output):
-                    // Parse background list from output
-                    let backgrounds = self.parseBackgrounds(from: output)
-                    completion(.success(backgrounds))
+                    completion(.success(self.parseBackgrounds(from: output)))
                 case .failure(let error):
                     completion(.failure(error))
                 }
@@ -107,19 +144,11 @@ final class TikTokFeaturesService {
     }
 
     func downloadBackgrounds(progressHandler: @escaping (String) -> Void, completion: @escaping (Result<String, Error>) -> Void) {
-        runFeatureWithProgress(.downloadBackgrounds, progressHandler: progressHandler) { result in
-            DispatchQueue.main.async {
-                completion(result)
-            }
-        }
+        runFeatureWithProgress(.downloadBackgrounds, progressHandler: progressHandler, completion: completion)
     }
 
     func addAccount(username: String, niche: String, name: String, completion: @escaping (Result<String, Error>) -> Void) {
-        runFeature(.addAccount(username: username, niche: niche, name: name)) { result in
-            DispatchQueue.main.async {
-                completion(result)
-            }
-        }
+        runFeature(.addAccount(username: username, niche: niche, name: name), completion: completion)
     }
 
     func listAccounts(niche: String? = nil, completion: @escaping (Result<[AccountInfo], Error>) -> Void) {
@@ -127,8 +156,7 @@ final class TikTokFeaturesService {
             DispatchQueue.main.async {
                 switch result {
                 case .success(let output):
-                    let accounts = self.parseAccounts(from: output)
-                    completion(.success(accounts))
+                    completion(.success(self.parseAccounts(from: output)))
                 case .failure(let error):
                     completion(.failure(error))
                 }
@@ -144,7 +172,11 @@ final class TikTokFeaturesService {
                     if let analytics = self.parseAnalytics(from: output) {
                         completion(.success(analytics))
                     } else {
-                        completion(.failure(NSError(domain: "TikTokFeatures", code: -1, userInfo: [NSLocalizedDescriptionKey: "Failed to parse analytics"])))
+                        completion(.failure(NSError(
+                            domain: "TikTokFeatures",
+                            code: -1,
+                            userInfo: [NSLocalizedDescriptionKey: "Failed to parse analytics"]
+                        )))
                     }
                 case .failure(let error):
                     completion(.failure(error))
@@ -153,22 +185,108 @@ final class TikTokFeaturesService {
         }
     }
 
-    // MARK: - Private Methods
+    func connectTikTok(completion: @escaping (Result<AuthStatus, Error>) -> Void) {
+        runUploadCommand(arguments: ["--oauth-connect"]) { result in
+            DispatchQueue.main.async {
+                switch result {
+                case .success(let output):
+                    if let status = self.parseAuthStatus(from: output) {
+                        completion(.success(status))
+                    } else {
+                        completion(.failure(NSError(
+                            domain: "TikTokFeatures",
+                            code: -2,
+                            userInfo: [NSLocalizedDescriptionKey: "Failed to parse OAuth response"]
+                        )))
+                    }
+                case .failure(let error):
+                    completion(.failure(error))
+                }
+            }
+        }
+    }
+
+    func getTikTokAuthStatus(completion: @escaping (Result<AuthStatus, Error>) -> Void) {
+        runUploadCommand(arguments: ["--oauth-status"]) { result in
+            DispatchQueue.main.async {
+                switch result {
+                case .success(let output):
+                    if let status = self.parseAuthStatus(from: output) {
+                        completion(.success(status))
+                    } else {
+                        completion(.failure(NSError(
+                            domain: "TikTokFeatures",
+                            code: -3,
+                            userInfo: [NSLocalizedDescriptionKey: "Failed to parse OAuth status"]
+                        )))
+                    }
+                case .failure(let error):
+                    completion(.failure(error))
+                }
+            }
+        }
+    }
+
+    func listVideos(completion: @escaping (Result<[VideoRecord], Error>) -> Void) {
+        runUploadCommand(arguments: ["--list-videos-json"]) { result in
+            DispatchQueue.main.async {
+                switch result {
+                case .success(let output):
+                    completion(.success(self.parseVideoRecords(from: output)))
+                case .failure(let error):
+                    completion(.failure(error))
+                }
+            }
+        }
+    }
+
+    func retryVideo(path: String, completion: @escaping (Result<String, Error>) -> Void) {
+        runUploadCommand(arguments: ["--retry-video", path], completion: completion)
+    }
+
+    func deleteVideo(path: String, completion: @escaping (Result<String, Error>) -> Void) {
+        runUploadCommand(arguments: ["--delete-video", path], completion: completion)
+    }
 
     private func runFeature(_ feature: Feature, completion: @escaping (Result<String, Error>) -> Void) {
         runFeatureWithProgress(feature, progressHandler: { _ in }, completion: completion)
     }
 
-    private func runFeatureWithProgress(_ feature: Feature, progressHandler: @escaping (String) -> Void, completion: @escaping (Result<String, Error>) -> Void) {
-        print("🔍 [TikTokFeatures] Running feature: \(feature.command)")
-        print("   Python: \(pythonExecutableURL.path)")
-        print("   Script: \(featuresScriptURL.path)")
-        print("   Args: \(feature.arguments)")
+    private func runFeatureWithProgress(
+        _ feature: Feature,
+        progressHandler: @escaping (String) -> Void,
+        completion: @escaping (Result<String, Error>) -> Void
+    ) {
+        runScript(
+            scriptURL: featuresScriptURL,
+            arguments: feature.arguments,
+            progressHandler: progressHandler,
+            completion: completion
+        )
+    }
 
-        guard FileManager.default.fileExists(atPath: featuresScriptURL.path) else {
-            let error = "Features script not found at: \(featuresScriptURL.path)"
-            print("❌ [TikTokFeatures] \(error)")
-            completion(.failure(NSError(domain: "TikTokFeatures", code: -1, userInfo: [NSLocalizedDescriptionKey: error])))
+    private func runUploadCommand(arguments: [String], completion: @escaping (Result<String, Error>) -> Void) {
+        runScript(
+            scriptURL: uploadScriptURL,
+            arguments: arguments,
+            progressHandler: { _ in },
+            completion: completion
+        )
+    }
+
+    private func runScript(
+        scriptURL: URL,
+        arguments: [String],
+        progressHandler: @escaping (String) -> Void,
+        completion: @escaping (Result<String, Error>) -> Void
+    ) {
+        guard FileManager.default.fileExists(atPath: scriptURL.path) else {
+            let error = NSError(
+                domain: "TikTokFeatures",
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "Script not found: \(scriptURL.path)"]
+            )
+            completion(.failure(error))
             return
         }
 
@@ -176,13 +294,28 @@ final class TikTokFeaturesService {
         let pipe = Pipe()
 
         process.executableURL = pythonExecutableURL
-        process.arguments = [featuresScriptURL.path] + feature.arguments
-        process.currentDirectoryURL = featuresScriptURL.deletingLastPathComponent()
+        process.arguments = [scriptURL.path] + arguments
+        // Set working directory to project root (not Python/ subdirectory)
+        // This allows Python imports to work correctly
+        process.currentDirectoryURL = scriptURL.deletingLastPathComponent().deletingLastPathComponent()
         process.standardOutput = pipe
         process.standardError = pipe
 
         var environment = ProcessInfo.processInfo.environment
         environment["PYTHONUNBUFFERED"] = "1"
+
+        // Ensure ffmpeg and other tools are in PATH
+        let homeDir = FileManager.default.homeDirectoryForCurrentUser.path
+        let userBinPath = "\(homeDir)/bin"
+        let brewBinPath = "/opt/homebrew/bin"
+        let usrLocalBin = "/usr/local/bin"
+
+        if let existingPath = environment["PATH"] {
+            environment["PATH"] = "\(userBinPath):\(brewBinPath):\(usrLocalBin):\(existingPath)"
+        } else {
+            environment["PATH"] = "\(userBinPath):\(brewBinPath):\(usrLocalBin):/usr/bin:/bin"
+        }
+
         process.environment = environment
 
         var outputData = Data()
@@ -192,7 +325,6 @@ final class TikTokFeaturesService {
             guard !data.isEmpty else { return }
             outputData.append(data)
             if let output = String(data: data, encoding: .utf8), !output.isEmpty {
-                print("📝 [TikTokFeatures] Output: \(output.prefix(200))")
                 DispatchQueue.main.async {
                     progressHandler(output)
                 }
@@ -200,105 +332,75 @@ final class TikTokFeaturesService {
         }
 
         process.terminationHandler = { process in
+            pipe.fileHandleForReading.readabilityHandler = nil
             let output = String(data: outputData, encoding: .utf8) ?? ""
-            print("✅ [TikTokFeatures] Process completed with status \(process.terminationStatus)")
-            print("   Output length: \(output.count) characters")
-
-            if process.terminationStatus == 0 {
-                completion(.success(output))
-            } else {
-                let error = "Process failed with status \(process.terminationStatus)\nOutput: \(output)"
-                print("❌ [TikTokFeatures] \(error)")
-                completion(.failure(NSError(domain: "TikTokFeatures", code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: error])))
+            DispatchQueue.main.async {
+                if process.terminationStatus == 0 {
+                    completion(.success(output))
+                } else {
+                    let error = NSError(
+                        domain: "TikTokFeatures",
+                        code: Int(process.terminationStatus),
+                        userInfo: [NSLocalizedDescriptionKey: "Process failed (\(process.terminationStatus)): \(output)"]
+                    )
+                    completion(.failure(error))
+                }
             }
         }
 
         do {
             try process.run()
-            print("✅ [TikTokFeatures] Process started successfully")
         } catch {
-            print("❌ [TikTokFeatures] Failed to start process: \(error.localizedDescription)")
             completion(.failure(error))
         }
     }
 
-    // MARK: - Parsing Methods
-
     private func parseBackgrounds(from output: String) -> [BackgroundInfo] {
         var backgrounds: [BackgroundInfo] = []
-
-        // Parse output looking for background filenames
         let lines = output.components(separatedBy: .newlines)
         for line in lines {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
-            // Look for lines like "   - filename.mp4"
-            if trimmed.hasPrefix("- ") || trimmed.hasPrefix("•") {
-                let name = trimmed.dropFirst(2).trimmingCharacters(in: .whitespaces)
-                if name.hasSuffix(".mp4") {
-                    // Try to infer theme from filename
-                    let theme = inferTheme(from: name)
-                    backgrounds.append(BackgroundInfo(
-                        name: name,
-                        path: "", // Full path would be in backgrounds directory
-                        theme: theme
-                    ))
-                }
-            }
+            guard trimmed.hasPrefix("- ") else { continue }
+            let name = String(trimmed.dropFirst(2)).trimmingCharacters(in: .whitespaces)
+            guard !name.isEmpty else { continue }
+            let theme = inferTheme(from: name)
+            backgrounds.append(BackgroundInfo(name: name, path: name, theme: theme))
         }
-
         return backgrounds
     }
 
     private func parseAccounts(from output: String) -> [AccountInfo] {
         var accounts: [AccountInfo] = []
-
-        print("🔍 [TikTokFeatures] Parsing accounts from output...")
-        print("   Output: \(output.prefix(500))")
-
-        // Parse output looking for account info
-        // Format: @username - niche - status - X followers
         let lines = output.components(separatedBy: .newlines)
+
         for line in lines {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if trimmed.hasPrefix("@") {
-                print("   Found account line: \(trimmed)")
-                let components = trimmed.components(separatedBy: " - ")
-                if components.count >= 3 {
-                    let username = String(components[0].dropFirst()) // Remove @
-                    let niche = components[1].trimmingCharacters(in: .whitespaces)
-                    let status = components[2].trimmingCharacters(in: .whitespaces)
+            guard trimmed.hasPrefix("@") else { continue }
+            let components = trimmed.components(separatedBy: " - ")
+            guard components.count >= 3 else { continue }
 
-                    // Try to extract follower count
-                    var followers = 0
-                    if components.count >= 4 {
-                        let followerStr = components[3].components(separatedBy: " ").first ?? "0"
-                        followers = Int(followerStr) ?? 0
-                    }
+            let username = String(components[0].dropFirst())
+            let niche = components[1]
+            let status = components[2]
+            let followers = components.count > 3 ? extractNumber(from: components[3]) : 0
 
-                    let account = AccountInfo(
-                        id: username,
-                        username: username,
-                        displayName: username,
-                        niche: niche,
-                        status: status,
-                        followers: followers,
-                        totalViews: 0,
-                        totalLikes: 0,
-                        totalPosts: 0
-                    )
-                    accounts.append(account)
-                    print("   ✅ Parsed account: @\(username)")
-                }
-            }
+            accounts.append(AccountInfo(
+                id: username,
+                username: username,
+                displayName: username,
+                niche: niche,
+                status: status,
+                followers: followers,
+                totalViews: 0,
+                totalLikes: 0,
+                totalPosts: 0
+            ))
         }
 
-        print("✅ [TikTokFeatures] Parsed \(accounts.count) accounts")
         return accounts
     }
 
     private func parseAnalytics(from output: String) -> Analytics? {
-        // Parse analytics output
-        // Format: Lines like "Total Views: 1,234"
         var totalViews = 0
         var totalLikes = 0
         var totalPosts = 0
@@ -309,21 +411,16 @@ final class TikTokFeaturesService {
         for line in lines {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
 
-            if trimmed.contains("total_views:") || trimmed.contains("Total Views:") {
-                let value = extractNumber(from: trimmed)
-                totalViews = value
-            } else if trimmed.contains("total_likes:") || trimmed.contains("Total Likes:") {
-                let value = extractNumber(from: trimmed)
-                totalLikes = value
-            } else if trimmed.contains("total_posts:") || trimmed.contains("Total Posts:") {
-                let value = extractNumber(from: trimmed)
-                totalPosts = value
-            } else if trimmed.contains("active_accounts:") || trimmed.contains("Active Accounts:") {
-                let value = extractNumber(from: trimmed)
-                activeAccounts = value
-            } else if trimmed.contains("follower_growth:") || trimmed.contains("Follower Growth:") {
-                let value = extractNumber(from: trimmed)
-                followerGrowth = value
+            if trimmed.contains("total_views:") {
+                totalViews = extractNumber(from: trimmed)
+            } else if trimmed.contains("total_likes:") {
+                totalLikes = extractNumber(from: trimmed)
+            } else if trimmed.contains("total_posts:") {
+                totalPosts = extractNumber(from: trimmed)
+            } else if trimmed.contains("active_accounts:") {
+                activeAccounts = extractNumber(from: trimmed)
+            } else if trimmed.contains("follower_growth:") {
+                followerGrowth = extractNumber(from: trimmed)
             }
         }
 
@@ -336,25 +433,59 @@ final class TikTokFeaturesService {
         )
     }
 
+    private func parseAuthStatus(from output: String) -> AuthStatus? {
+        guard let json = extractJSONLine(prefix: "AUTH_JSON:", from: output),
+              let data = json.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+
+        let connected = object["connected"] as? Bool ?? false
+        let expiresAt = object["expires_at"] as? String
+        let secondsRemaining = object["seconds_remaining"] as? Int ?? 0
+        let scope = object["scope"] as? String
+
+        return AuthStatus(
+            connected: connected,
+            expiresAt: expiresAt,
+            secondsRemaining: secondsRemaining,
+            scope: scope
+        )
+    }
+
+    private func parseVideoRecords(from output: String) -> [VideoRecord] {
+        guard let json = extractJSONLine(prefix: "VIDEOS_JSON:", from: output),
+              let data = json.data(using: .utf8),
+              let records = try? JSONDecoder().decode([VideoRecord].self, from: data) else {
+            return []
+        }
+        return records
+    }
+
+    private func extractJSONLine(prefix: String, from output: String) -> String? {
+        let lines = output.components(separatedBy: .newlines)
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard trimmed.hasPrefix(prefix) else { continue }
+            return String(trimmed.dropFirst(prefix.count)).trimmingCharacters(in: .whitespaces)
+        }
+        return nil
+    }
+
     private func extractNumber(from string: String) -> Int {
-        // Extract first number from string, handling commas
         let cleaned = string.components(separatedBy: CharacterSet.decimalDigits.inverted).joined()
         return Int(cleaned) ?? 0
     }
 
     private func inferTheme(from filename: String) -> String? {
         let lower = filename.lowercased()
-        if lower.contains("scary") || lower.contains("horror") { return "scary" }
-        if lower.contains("dating") || lower.contains("romance") { return "dating" }
-        if lower.contains("crazy") || lower.contains("wild") { return "crazy" }
-        if lower.contains("mystery") { return "mystery" }
-        if lower.contains("motivational") || lower.contains("inspire") { return "motivational" }
-        if lower.contains("creepy") { return "creepy" }
-        if lower.contains("interesting") || lower.contains("facts") { return "interesting" }
+        if lower.contains("gta") || lower.contains("game") { return "gaming" }
+        if lower.contains("subway") { return "subway" }
+        if lower.contains("satisfying") { return "satisfying" }
+        if lower.contains("dating") { return "dating" }
+        if lower.contains("motiv") { return "motivational" }
         return nil
     }
-
-    // MARK: - Path Helpers
 
     private static func defaultPythonExecutableURL() -> URL {
         let env = ProcessInfo.processInfo.environment
@@ -380,14 +511,22 @@ final class TikTokFeaturesService {
     private static func defaultFeaturesScriptURL() -> URL {
         let fileManager = FileManager.default
 
-        // Check bundled resources first
         if let bundledScript = Bundle.main.resourceURL?.appendingPathComponent("Python/tiktok_features.py"),
            fileManager.fileExists(atPath: bundledScript.path) {
             return bundledScript
         }
 
-        // Check project directory
-        let projectScript = URL(fileURLWithPath: "\(NSHomeDirectory())/TikTokUploadManager/Python/tiktok_features.py")
-        return projectScript
+        return URL(fileURLWithPath: "\(NSHomeDirectory())/TikTokUploadManager/Python/tiktok_features.py")
+    }
+
+    private static func defaultUploadScriptURL() -> URL {
+        let fileManager = FileManager.default
+
+        if let bundledScript = Bundle.main.resourceURL?.appendingPathComponent("Python/tiktok_upload_cli.py"),
+           fileManager.fileExists(atPath: bundledScript.path) {
+            return bundledScript
+        }
+
+        return URL(fileURLWithPath: "\(NSHomeDirectory())/TikTokUploadManager/Python/tiktok_upload_cli.py")
     }
 }

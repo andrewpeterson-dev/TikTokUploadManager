@@ -418,6 +418,60 @@ struct ContentView: View {
                     .padding(.leading)
                 }
             }
+
+            Divider()
+            shortformEngineSection
+        }
+    }
+
+    private var shortformEngineSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Shortform AI Engine")
+                .font(.subheadline)
+                .fontWeight(.medium)
+                .foregroundColor(.blue)
+
+            Toggle("Enable Shortform AI Optimization", isOn: $vm.shortformAIEnabled)
+                .help("Runs retention/aesthetic optimization after every render.")
+
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(shortformStatusColor)
+                    .frame(width: 8, height: 8)
+                Text(shortformStatusText)
+                    .font(.caption)
+                    .foregroundStyle(shortformStatusColor)
+            }
+
+            Stepper(
+                "Aesthetic Threshold: \(vm.shortformAestheticThreshold)",
+                value: $vm.shortformAestheticThreshold,
+                in: 50...95
+            )
+            Stepper(
+                "Engagement Threshold: \(vm.shortformEngagementThreshold)",
+                value: $vm.shortformEngagementThreshold,
+                in: 50...95
+            )
+
+            if let aesthetic = vm.shortformLastAestheticScore,
+               let engagement = vm.shortformLastEngagementScore {
+                Text("Last scores: Aesthetic \(aesthetic)/100 • Engagement \(engagement)/100 • Source: \(vm.shortformLastValidationSource)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            } else {
+                Text("Run a clip to capture live shortform metrics.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            if vm.shortformLastCorrections != "none" {
+                Text("Corrections: \(vm.shortformLastCorrections)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
         }
     }
 
@@ -990,6 +1044,26 @@ struct ContentView: View {
         case .stopped:
             return .orange
         }
+    }
+
+    private var shortformStatusText: String {
+        if !vm.shortformAIEnabled {
+            return "Disabled"
+        }
+        if vm.shortformDetectedThisRun {
+            return "Integrated: Active in latest run"
+        }
+        return "Enabled: waiting for next render"
+    }
+
+    private var shortformStatusColor: Color {
+        if !vm.shortformAIEnabled {
+            return .secondary
+        }
+        if vm.shortformDetectedThisRun {
+            return .green
+        }
+        return .orange
     }
 
     // MARK: - Features View

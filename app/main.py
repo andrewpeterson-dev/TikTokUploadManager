@@ -27,6 +27,7 @@ try:
     from app.services.tiktok_api import TikTokAPI, TikTokAPIError
     from app.services.upload_queue import UploadQueueWorker
     from app.services.video_engine import GeneratedClip, VideoEngine
+    from app.services.shortform_ai_engine import SHORTFORM_AI_ENABLED, optimize_shortform_video
     from app.services.ai_video_generator import AIVideoGenerator
 except ModuleNotFoundError:
     project_root = APP_ROOT.parent
@@ -37,6 +38,7 @@ except ModuleNotFoundError:
     from services.tiktok_api import TikTokAPI, TikTokAPIError
     from services.upload_queue import UploadQueueWorker
     from services.video_engine import GeneratedClip, VideoEngine
+    from services.shortform_ai_engine import SHORTFORM_AI_ENABLED, optimize_shortform_video
     from services.ai_video_generator import AIVideoGenerator
 
 
@@ -387,6 +389,15 @@ def command_generate_ai_video(args: argparse.Namespace) -> int:
 
     if not video_path:
         raise RuntimeError("AI video generation failed")
+
+    # Integration point:
+    # video = generate_video()
+    # if SHORTFORM_AI_ENABLED:
+    #     video = optimize_shortform_video(video, transcript)
+    transcript = ""
+    if SHORTFORM_AI_ENABLED:
+        progress("Running short-form AI optimization...")
+        video_path = optimize_shortform_video(video_path, transcript)
 
     # Create video record in database
     video_file = Path(video_path)

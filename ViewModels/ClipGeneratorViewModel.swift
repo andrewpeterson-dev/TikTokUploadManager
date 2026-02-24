@@ -250,6 +250,15 @@ final class ClipGeneratorViewModel: ObservableObject {
     @Published var backgroundTheme: String = "scary"
     @Published var selectedAccountUsername: String = ""
     @Published var autoTrackPost: Bool = false
+    @Published var shortformAIEnabled: Bool = true
+    @Published var shortformAestheticThreshold: Int = 75
+    @Published var shortformEngagementThreshold: Int = 70
+    @Published var shortformDetectedThisRun: Bool = false
+    @Published var shortformLastAestheticScore: Int?
+    @Published var shortformLastEngagementScore: Int?
+    @Published var shortformLastValidationSource: String = "n/a"
+    @Published var shortformLastCorrections: String = "none"
+    @Published var shortformLastError: String = ""
 
     // AI Video Generation settings
     @Published var aiVideoTheme: AIVideoTheme = .scary
@@ -350,7 +359,7 @@ final class ClipGeneratorViewModel: ObservableObject {
         let trimmedURL = videoURL.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmedURL.starts(with: "http://") && !trimmedURL.starts(with: "https://") {
             // This appears to be a local file path
-            let filePath = trimmedURL.expandingTildeInPath
+            let filePath = NSString(string: trimmedURL).expandingTildeInPath
             if !FileManager.default.fileExists(atPath: filePath) {
                 progressText = "Video file not found"
                 runState = .failed
@@ -370,6 +379,12 @@ final class ClipGeneratorViewModel: ObservableObject {
         didRequestStop = false
         sawErrorOutput = false
         processExitCode = nil
+        shortformDetectedThisRun = false
+        shortformLastAestheticScore = nil
+        shortformLastEngagementScore = nil
+        shortformLastValidationSource = "n/a"
+        shortformLastCorrections = "none"
+        shortformLastError = ""
 
         let runSummary = "format=\(clipFormat.rawValue), theme=\(contentTheme.rawValue), variation=\(variationMode.rawValue)"
         appendFeed("Generation started (\(runSummary)).", level: .info)
@@ -397,6 +412,11 @@ final class ClipGeneratorViewModel: ObservableObject {
         if autoTrackPost && !selectedAccountUsername.isEmpty {
             args += ["--auto_track", "true", "--account_username", selectedAccountUsername]
         }
+        args += [
+            "--shortform_ai", "\(shortformAIEnabled)",
+            "--aesthetic_threshold", "\(shortformAestheticThreshold)",
+            "--engagement_threshold", "\(shortformEngagementThreshold)"
+        ]
 
         generationService.runScript(arguments: args) { [weak self] output in
             self?.consumeOutput(output)
@@ -466,6 +486,7 @@ final class ClipGeneratorViewModel: ObservableObject {
         let runSummary = "AI video: theme=\(aiVideoTheme.rawValue), duration=\(aiVideoDuration.rawValue)s, type=\(aiVideoType.rawValue)"
         appendFeed("AI video generation started (\(runSummary)).", level: .info)
 
+        // Run the backend command
         let args = [
             "generate-ai-video",
             "--theme", aiVideoTheme.rawValue,
@@ -473,23 +494,44 @@ final class ClipGeneratorViewModel: ObservableObject {
             "--video-type", aiVideoType.rawValue
         ]
 
-        generationService.runProcess(
-            command: "python3",
-            arguments: ["-m", "app.main"] + args,
-            workingDirectory: featuresService.backendRoot,
-            onOutput: { [weak self] line in
-                Task { @MainActor in
-                    guard let self else { return }
-                    self.handleAIVideoOutput(line)
-                }
-            },
-            onExit: { [weak self] exitCode in
-                Task { @MainActor in
-                    guard let self else { return }
-                    self.handleAIVideoExit(exitCode)
+        // Use bash to run python command in backend directory
+        let backendPath = NSHomeDirectory() + "/TikTokUploadManager/app"
+        let command = "cd '\(backendPath)' && python3 -m app.main \(args.joined(separator: " "))"
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/bin/bash")
+            process.arguments = ["-c", command]
+
+            let pipe = Pipe()
+            process.standardOutput = pipe
+            process.standardError = pipe
+
+            let handle = pipe.fileHandleForReading
+            handle.readabilityHandler = { fileHandle in
+                let data = fileHandle.availableData
+                if !data.isEmpty, let line = String(data: data, encoding: .utf8) {
+                    Task { @MainActor in
+                        self?.handleAIVideoOutput(line)
+                    }
                 }
             }
-        )
+
+            do {
+                try process.run()
+                process.waitUntilExit()
+
+                Task { @MainActor in
+                    self?.handleAIVideoExit(process.terminationStatus)
+                }
+            } catch {
+                Task { @MainActor in
+                    self?.appendFeed("Failed to start AI video generation: \(error)", level: .error)
+                    self?.isProcessing = false
+                    self?.runState = .failed
+                }
+            }
+        }
     }
 
     private func handleAIVideoOutput(_ line: String) {
@@ -527,21 +569,21 @@ final class ClipGeneratorViewModel: ObservableObject {
             return
         }
 
-        let duration = json["duration"] as? String ?? "0"
+        let durationInt = (json["duration"] as? String).flatMap({ Int($0) }) ?? 0
         let size = json["size"] as? String ?? "0 B"
 
         let clip = Clip(
-            id: videoId,
+            videoId: videoId,
             fileName: fileName,
-            path: path,
-            duration: duration,
+            duration: durationInt,
             size: size,
+            path: path,
             status: status,
             uploadStatus: nil,
             retryCount: nil
         )
 
-        if !generatedClips.contains(where: { $0.id == clip.id }) {
+        if !generatedClips.contains(where: { $0.videoId == clip.videoId }) {
             generatedClips.append(clip)
         }
     }
@@ -898,6 +940,10 @@ final class ClipGeneratorViewModel: ObservableObject {
             return
         }
 
+        if trimmed.contains("shortform ") {
+            parseShortformLog(trimmed)
+        }
+
         progressText = trimmed
 
         if let (step, total) = parseStep(from: trimmed), total > 0 {
@@ -919,6 +965,61 @@ final class ClipGeneratorViewModel: ObservableObject {
         let numbers = match.components(separatedBy: CharacterSet.decimalDigits.inverted).compactMap { Int($0) }
         guard numbers.count >= 2 else { return nil }
         return (numbers[0], numbers[1])
+    }
+
+    private func parseShortformLog(_ line: String) {
+        shortformDetectedThisRun = true
+
+        if line.contains("shortform optimization failed") {
+            shortformLastError = line
+            appendFeed("Shortform AI failed; fallback to original render.", level: .warning)
+            return
+        }
+
+        if line.contains("shortform AI validation failed") {
+            shortformLastError = line
+            appendFeed("Shortform AI API unavailable; local validation fallback used.", level: .warning)
+            return
+        }
+
+        if line.contains("shortform corrections applied="),
+           let range = line.range(of: "shortform corrections applied=") {
+            shortformLastCorrections = String(line[range.upperBound...]).trimmingCharacters(in: .whitespaces)
+            return
+        }
+
+        guard line.contains("shortform validation source=") else {
+            return
+        }
+
+        let source = extractCapture(from: line, pattern: #"source=([a-zA-Z_]+)"#, group: 1) ?? "unknown"
+        let aesthetic = Int(extractCapture(from: line, pattern: #"aesthetic_score=(\d+)"#, group: 1) ?? "")
+        let engagement = Int(extractCapture(from: line, pattern: #"engagement_score=(\d+)"#, group: 1) ?? "")
+
+        shortformLastValidationSource = source
+        shortformLastAestheticScore = aesthetic
+        shortformLastEngagementScore = engagement
+
+        if let aesthetic, let engagement {
+            let level: FeedLevel = (aesthetic >= shortformAestheticThreshold && engagement >= shortformEngagementThreshold) ? .success : .warning
+            appendFeed(
+                "Shortform AI score A\(aesthetic) E\(engagement) (\(source)).",
+                level: level
+            )
+        }
+    }
+
+    private func extractCapture(from input: String, pattern: String, group: Int) -> String? {
+        guard let regex = try? NSRegularExpression(pattern: pattern) else {
+            return nil
+        }
+        let range = NSRange(input.startIndex..<input.endIndex, in: input)
+        guard let match = regex.firstMatch(in: input, options: [], range: range),
+              match.numberOfRanges > group,
+              let valueRange = Range(match.range(at: group), in: input) else {
+            return nil
+        }
+        return String(input[valueRange])
     }
 
     private func parseClipJSON(_ line: String) {

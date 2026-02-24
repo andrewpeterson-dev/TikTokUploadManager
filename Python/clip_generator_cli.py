@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import warnings
 from pathlib import Path
@@ -12,10 +13,6 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-
-from app.main import configure_logging
-from app.services.storage import AppStorage
-from app.services.video_engine import VideoEngine
 
 warnings.filterwarnings("ignore", message="urllib3 v2 only supports OpenSSL")
 
@@ -73,12 +70,25 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--background_theme", default="scary")
     parser.add_argument("--account_username", default="")
     parser.add_argument("--auto_track", default="false")
+    parser.add_argument("--shortform_ai", default="true", help="Enable shortform AI optimization (true/false)")
+    parser.add_argument("--aesthetic_threshold", type=int, default=75, help="Shortform aesthetic threshold")
+    parser.add_argument("--engagement_threshold", type=int, default=70, help="Shortform engagement threshold")
     return parser
 
 
 def main() -> int:
-    configure_logging()
     args = build_parser().parse_args()
+
+    shortform_ai_enabled = parse_bool(args.shortform_ai)
+    os.environ["SHORTFORM_AI_ENABLED"] = "true" if shortform_ai_enabled else "false"
+    os.environ["AESTHETIC_THRESHOLD"] = str(args.aesthetic_threshold)
+    os.environ["ENGAGEMENT_THRESHOLD"] = str(args.engagement_threshold)
+
+    from app.main import configure_logging
+    from app.services.storage import AppStorage
+    from app.services.video_engine import VideoEngine
+
+    configure_logging()
 
     _ = parse_bool(args.captions)
     _ = parse_bool(args.music)
@@ -94,7 +104,9 @@ def main() -> int:
         "CONFIG: "
         f"format={args.clip_format} "
         f"theme={args.content_theme} "
-        f"variation={args.variation_mode}"
+        f"variation={args.variation_mode} "
+        f"shortform_ai={shortform_ai_enabled} "
+        f"thresholds={args.aesthetic_threshold}/{args.engagement_threshold}"
     )
 
     if use_smart_backgrounds:
