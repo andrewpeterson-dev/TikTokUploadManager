@@ -1,6 +1,4 @@
 import SwiftUI
-import AVKit
-import AVFoundation
 
 struct ContentView: View {
 
@@ -9,7 +7,6 @@ struct ContentView: View {
     @State private var selection: String? = "clip_creator"
     @State private var selectedGeneratedClipKey: String?
     @State private var selectedPostClipKey: String?
-    @State private var previewPlayer: AVPlayer?
 
     var body: some View {
         NavigationSplitView {
@@ -86,12 +83,6 @@ struct ContentView: View {
         .onChange(of: vm.generatedClips) {
             syncSelectedClipAndPlayer()
             syncPostSelection()
-        }
-        .onChange(of: selectedGeneratedClipKey) {
-            setPreviewPlayerForSelection()
-        }
-        .onDisappear {
-            previewPlayer?.pause()
         }
     }
 
@@ -597,25 +588,30 @@ struct ContentView: View {
                 .font(.headline)
 
             if let clip = selectedGeneratedClip {
-                if let path = clip.path, !path.isEmpty, FileManager.default.fileExists(atPath: path), let previewPlayer {
-                    VideoPlayer(player: previewPlayer)
-                        .frame(minHeight: 320)
-                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                if let path = clip.path, !path.isEmpty, FileManager.default.fileExists(atPath: path) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Image(systemName: "film.stack")
+                            .font(.system(size: 34))
+                            .foregroundStyle(.secondary)
+                        Text("Inline preview disabled for stability.")
+                            .font(.subheadline)
+                        Text("Use Open Clip to play in your default video app.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 220, alignment: .topLeading)
+                    .padding(12)
+                    .background(Color(NSColor.windowBackgroundColor))
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
 
                     HStack(spacing: 8) {
-                        Button("Play") {
-                            previewPlayer.play()
+                        Button("Open Clip") {
+                            vm.openClip(clip)
                         }
                         .buttonStyle(.borderedProminent)
 
-                        Button("Pause") {
-                            previewPlayer.pause()
-                        }
-                        .buttonStyle(.bordered)
-
-                        Button("Restart") {
-                            previewPlayer.seek(to: .zero)
-                            previewPlayer.play()
+                        Button("Reveal in Finder") {
+                            vm.revealClipInFinder(clip)
                         }
                         .buttonStyle(.bordered)
 
@@ -925,19 +921,15 @@ struct ContentView: View {
     private func syncSelectedClipAndPlayer() {
         guard !vm.generatedClips.isEmpty else {
             selectedGeneratedClipKey = nil
-            previewPlayer?.pause()
-            previewPlayer = nil
             return
         }
 
         if let key = selectedGeneratedClipKey,
            vm.generatedClips.contains(where: { clipSelectionKey(for: $0) == key }) {
-            setPreviewPlayerForSelection()
             return
         }
 
         selectedGeneratedClipKey = clipSelectionKey(for: vm.generatedClips[0])
-        setPreviewPlayerForSelection()
     }
 
     private func syncPostSelection() {
@@ -955,20 +947,6 @@ struct ContentView: View {
         if vm.postCaptionDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             vm.applySuggestedCaption(for: vm.generatedClips[0])
         }
-    }
-
-    private func setPreviewPlayerForSelection() {
-        guard let clip = selectedGeneratedClip,
-              let path = clip.path,
-              !path.isEmpty,
-              FileManager.default.fileExists(atPath: path) else {
-            previewPlayer?.pause()
-            previewPlayer = nil
-            return
-        }
-
-        previewPlayer?.pause()
-        previewPlayer = AVPlayer(url: URL(fileURLWithPath: path))
     }
 
     private func feedColor(for level: ClipGeneratorViewModel.FeedLevel) -> Color {
