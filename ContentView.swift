@@ -1,4 +1,6 @@
 import SwiftUI
+import AVKit
+import AVFoundation
 
 struct ContentView: View {
 
@@ -7,6 +9,8 @@ struct ContentView: View {
     @State private var selection: String? = "clip_creator"
     @State private var selectedGeneratedClipKey: String?
     @State private var selectedPostClipKey: String?
+    @State private var inAppPreviewURL: URL?
+    @State private var isInAppPreviewPresented = false
 
     var body: some View {
         NavigationSplitView {
@@ -29,6 +33,16 @@ struct ContentView: View {
         } detail: {
             detailContent
                 .frame(minWidth: 920, minHeight: 660)
+        }
+        .sheet(isPresented: $isInAppPreviewPresented, onDismiss: {
+            inAppPreviewURL = nil
+        }) {
+            if let inAppPreviewURL {
+                InAppClipPreviewSheet(videoURL: inAppPreviewURL)
+            } else {
+                Text("No clip selected for preview.")
+                    .padding(24)
+            }
         }
     }
 
@@ -518,7 +532,9 @@ struct ContentView: View {
             }
 
             if vm.runState == .failed {
-                Text("Clip generation failed. Inspect logs below for details.")
+                Text(vm.sourceMode == .aiVideo
+                    ? "AI video generation failed. Inspect logs below for details."
+                    : "Clip generation failed. Inspect logs below for details.")
                     .font(.subheadline)
                     .foregroundStyle(.red)
             }
@@ -529,13 +545,10 @@ struct ContentView: View {
                 ProgressView()
             }
 
-            TextEditor(text: $vm.logs)
-                .font(.system(.caption, design: .monospaced))
+            AutoScrollingTextView(text: vm.logs)
                 .frame(height: 160)
-                .padding(6)
                 .background(Color(NSColor.windowBackgroundColor))
                 .clipShape(RoundedRectangle(cornerRadius: 8))
-                .disabled(true)
         }
     }
 
@@ -593,9 +606,9 @@ struct ContentView: View {
                         Image(systemName: "film.stack")
                             .font(.system(size: 34))
                             .foregroundStyle(.secondary)
-                        Text("Inline preview disabled for stability.")
+                        Text("In-app preview is available.")
                             .font(.subheadline)
-                        Text("Use Open Clip to play in your default video app.")
+                        Text("Use Preview In App to watch here, or Open Clip for your default player.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -605,10 +618,15 @@ struct ContentView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 10))
 
                     HStack(spacing: 8) {
+                        Button("Preview In App") {
+                            openInAppPreview(clip)
+                        }
+                        .buttonStyle(.borderedProminent)
+
                         Button("Open Clip") {
                             vm.openClip(clip)
                         }
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(.bordered)
 
                         Button("Reveal in Finder") {
                             vm.revealClipInFinder(clip)
@@ -947,6 +965,14 @@ struct ContentView: View {
         if vm.postCaptionDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             vm.applySuggestedCaption(for: vm.generatedClips[0])
         }
+    }
+
+    private func openInAppPreview(_ clip: Clip) {
+        guard let path = clip.path, !path.isEmpty else { return }
+        let url = URL(fileURLWithPath: path)
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        inAppPreviewURL = url
+        isInAppPreviewPresented = true
     }
 
     private func feedColor(for level: ClipGeneratorViewModel.FeedLevel) -> Color {
@@ -1488,5 +1514,66 @@ struct ContentView: View {
             }
         }
         .frame(height: 300)
+    }
+}
+
+private struct InAppClipPreviewSheet: View {
+    let videoURL: URL
+    @State private var player = AVPlayer()
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(videoURL.lastPathComponent)
+                .font(.headline)
+                .lineLimit(1)
+
+            VideoPlayer(player: player)
+                .frame(minWidth: 900, minHeight: 560)
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+                .onAppear {
+                    let item = AVPlayerItem(url: videoURL)
+                    player.replaceCurrentItem(with: item)
+                    player.play()
+                }
+                .onDisappear {
+                    player.pause()
+                    player.replaceCurrentItem(with: nil)
+                }
+        }
+        .padding(20)
+    }
+}
+
+private struct AutoScrollingTextView: NSViewRepresentable {
+    let text: String
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scrollView = NSTextView.scrollableTextView()
+        let textView = scrollView.documentView as! NSTextView
+
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.font = NSFont.monospacedSystemFont(ofSize: 10, weight: .regular)
+        textView.textColor = .labelColor
+        textView.backgroundColor = .windowBackgroundColor
+        textView.autoresizingMask = [.width]
+        textView.textContainerInset = NSSize(width: 6, height: 6)
+
+        return scrollView
+    }
+
+    func updateNSView(_ scrollView: NSScrollView, context: Context) {
+        guard let textView = scrollView.documentView as? NSTextView else { return }
+
+        // Update text
+        textView.string = text.isEmpty ? "No output yet..." : text
+
+        // Auto-scroll to bottom after layout completes
+        if !text.isEmpty {
+            DispatchQueue.main.async {
+                let range = NSRange(location: textView.string.count, length: 0)
+                textView.scrollRangeToVisible(range)
+            }
+        }
     }
 }

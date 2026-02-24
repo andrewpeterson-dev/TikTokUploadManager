@@ -4,6 +4,8 @@ Generates AI-powered videos with stories, commentary, or news
 """
 
 import sys
+import os
+import logging
 from pathlib import Path
 from typing import Optional, Callable, Literal
 from datetime import datetime
@@ -13,6 +15,16 @@ CLIP_EMPIRE_DIR = Path.home() / "clip-empire"
 if str(CLIP_EMPIRE_DIR) not in sys.path:
     sys.path.insert(0, str(CLIP_EMPIRE_DIR))
     sys.path.insert(0, str(CLIP_EMPIRE_DIR / "src"))
+
+# Load environment variables from clip-empire .env file
+env_file = CLIP_EMPIRE_DIR / ".env"
+if env_file.exists():
+    with open(env_file) as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith('#') and '=' in line:
+                key, value = line.split('=', 1)
+                os.environ[key] = value
 
 try:
     from content_generator import ContentGenerator
@@ -26,6 +38,7 @@ except ImportError as e:
 
 
 VideoType = Literal["story", "commentary", "news"]
+LOGGER = logging.getLogger("tiktok_manager.ai_video_generator")
 
 
 class AIVideoGenerator:
@@ -37,12 +50,16 @@ class AIVideoGenerator:
 
         self.output_dir = output_dir
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.dependencies_available = (
+            ContentGenerator is not None and ViralVideoEditor is not None and BackgroundManager is not None
+        )
+        self.last_caption: str = ""
+        self.last_transcript: str = ""
+        self.last_audio_path: Optional[str] = None
 
-        # Check if dependencies are available
-        if ContentGenerator is None or ViralVideoEditor is None or BackgroundManager is None:
-            raise RuntimeError(
-                "AI video generation dependencies not available. "
-                "Check that clip-empire is set up correctly."
+        if not self.dependencies_available:
+            LOGGER.warning(
+                "clip-empire dependencies unavailable; AI generator will defer to backend fallback renderer."
             )
 
     def generate_video(
@@ -64,12 +81,24 @@ class AIVideoGenerator:
         Returns:
             Path to the generated video file, or None if generation failed
         """
+        self.last_caption = ""
+        self.last_transcript = ""
+        self.last_audio_path = None
+
+        if not self.dependencies_available:
+            if progress_callback:
+                progress_callback("⚠️ AI generator dependencies unavailable. Using backend fallback renderer.")
+            return None
+
         try:
             def log(message: str):
-                if progress_callback:
-                    progress_callback(message)
-                else:
-                    print(message)
+                try:
+                    if progress_callback:
+                        progress_callback(message)
+                    else:
+                        print(message)
+                except BrokenPipeError:
+                    pass
 
             log(f"🎬 Starting AI video generation...")
             log(f"   Theme: {theme}")
@@ -95,6 +124,15 @@ class AIVideoGenerator:
                 package = generator.create_content_package(theme, target_duration=duration)
             else:  # story (default)
                 package = generator.create_content_package(theme, target_duration=duration)
+
+            self.last_caption = str(package.get("caption") or "").strip()
+            self.last_transcript = str(
+                package.get("script")
+                or package.get("story")
+                or package.get("text")
+                or self.last_caption
+            ).strip()
+            self.last_audio_path = str(package.get("audio_path") or "").strip() or None
 
             if not package.get("audio_path"):
                 raise RuntimeError("Voiceover generation failed, cannot render video")
@@ -154,12 +192,14 @@ class AIVideoGenerator:
             return video_path
 
         except Exception as e:
-            if progress_callback:
-                progress_callback(f"❌ Error: {str(e)}")
-            else:
-                print(f"❌ Error generating AI video: {e}")
-            import traceback
-            traceback.print_exc()
+            LOGGER.exception("AI video generation failed: %s", e)
+            try:
+                if progress_callback:
+                    progress_callback(f"Primary generator error: {e}")
+                else:
+                    print(f"Primary generator error: {e}")
+            except BrokenPipeError:
+                pass
             return None
 
     def get_available_themes(self) -> list[str]:

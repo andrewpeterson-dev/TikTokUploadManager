@@ -39,6 +39,13 @@ if [[ -d "$PYTHON_BACKEND_DIR" ]]; then
   chmod +x "$RESOURCES_DIR/Python/clip_generator_cli.py" || true
 fi
 
+# Copy the app/ backend package so clip_generator_cli.py can resolve "from app.services.*"
+APP_BACKEND_DIR="$PROJECT_DIR/app"
+if [[ -d "$APP_BACKEND_DIR" ]]; then
+  rm -rf "$RESOURCES_DIR/app"
+  cp -R "$APP_BACKEND_DIR" "$RESOURCES_DIR/app"
+fi
+
 if [[ ! -f "$ICON_SOURCE" ]]; then
   echo "Missing icon file: $ICON_SOURCE"
   exit 1

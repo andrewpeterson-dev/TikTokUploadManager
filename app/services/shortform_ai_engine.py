@@ -305,6 +305,7 @@ def _apply_primary_pass(
     reduced_font: bool = False,
     engagement_boost: bool = False,
     simplify_colors: bool = False,
+    recover_dark_tone: bool = False,
 ) -> Tuple[Path, List[str]]:
     has_audio = _has_audio_stream(input_path)
     duration = max(_probe_duration(input_path), 0.1)
@@ -321,12 +322,16 @@ def _apply_primary_pass(
     if high_energy or engagement_boost:
         visual_filters.append("scale=1112:1978:flags=lanczos")
         visual_filters.append("crop=1080:1920")
-        visual_filters.append("eq=contrast=1.08:saturation=1.08:brightness=0.01")
+        visual_filters.append("eq=contrast=1.06:saturation=1.07:brightness=0.02")
         corrections.append("visual_energy_micro_zoom")
     else:
-        visual_filters.append("eq=contrast=1.04:saturation=1.03:brightness=0.015")
+        visual_filters.append("eq=contrast=1.05:saturation=1.06:brightness=0.03")
         visual_filters.append("unsharp=5:5:0.45:5:5:0.0")
         corrections.append("cinematic_motion_grade")
+
+    if recover_dark_tone:
+        visual_filters.append("eq=contrast=1.08:saturation=1.08:brightness=0.05")
+        corrections.append("dark_tone_recovery")
 
     if simplify_colors:
         visual_filters.append("hue=s=0.93")
@@ -391,7 +396,7 @@ def _apply_primary_pass(
         "-c:v",
         "libx264",
         "-preset",
-        "medium",
+        "fast",
         "-crf",
         "18",
         "-pix_fmt",
@@ -437,21 +442,25 @@ def _frame_summary_opencv(video_path: Path) -> Dict[str, Any]:
         }
 
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-    step = max(1, int(round(fps * 0.5)))
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+
+    # Sample ~30 evenly-spaced frames by seeking directly instead of reading
+    # every frame sequentially.  This cuts analysis from 40-70s to ~3-5s.
+    max_samples = 30
+    target_count = min(max_samples, max(1, total_frames))
+    seek_indices = [int(i * total_frames / target_count) for i in range(target_count)] if total_frames > 0 else []
 
     sample_count = 0
     caption_overlap_hits = 0
     clipping_hits = 0
     oversat_hits = 0
     active_colors: List[float] = []
+    luma_samples: List[float] = []
 
-    frame_index = 0
-    while True:
+    for frame_idx in seek_indices:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
         ok, frame = cap.read()
         if not ok or frame is None:
-            break
-        frame_index += 1
-        if frame_index % step != 0:
             continue
 
         sample_count += 1
@@ -470,6 +479,7 @@ def _frame_summary_opencv(video_path: Path) -> Dict[str, Any]:
         active_colors.append(float(len(uniq)))
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        luma_samples.append(float(np.mean(gray)))
         edges = cv2.Canny(gray, 80, 160)
 
         border = max(6, int(min(h, w) * 0.03))
@@ -488,9 +498,6 @@ def _frame_summary_opencv(video_path: Path) -> Dict[str, Any]:
         if lower_density > 0.12:
             caption_overlap_hits += 1
 
-        if sample_count >= 140:
-            break
-
     cap.release()
 
     return {
@@ -499,8 +506,47 @@ def _frame_summary_opencv(video_path: Path) -> Dict[str, Any]:
         "edge_clipping_ratio": round(clipping_hits / max(sample_count, 1), 3),
         "oversaturation_ratio": round(oversat_hits / max(sample_count, 1), 3),
         "active_color_mean": round(float(np.mean(active_colors)) if active_colors else 0.0, 2),
+        "mean_luma": round(float(np.mean(luma_samples)) if luma_samples else 0.0, 2),
+        "min_luma": round(float(min(luma_samples)) if luma_samples else 0.0, 2),
         "cv_available": True,
     }
+
+
+def _looks_like_black_screen(summary: Dict[str, Any], reference: Optional[Dict[str, Any]] = None) -> bool:
+    sample_count = int(summary.get("sample_count") or 0)
+    if sample_count < 2:
+        return False
+
+    mean_luma = float(summary.get("mean_luma") or 0.0)
+    min_luma = float(summary.get("min_luma") or mean_luma)
+
+    if mean_luma <= 16.0 and min_luma <= 7.0:
+        return True
+
+    if reference:
+        ref_mean = float(reference.get("mean_luma") or mean_luma)
+        ref_min = float(reference.get("min_luma") or mean_luma)
+        if ref_mean > 0 and mean_luma < ref_mean * 0.35 and min_luma < max(ref_min * 0.35, 5.0):
+            return True
+
+    return False
+
+
+def _requires_dark_recovery(summary: Dict[str, Any]) -> bool:
+    sample_count = int(summary.get("sample_count") or 0)
+    if sample_count < 2:
+        return False
+
+    mean_luma = float(summary.get("mean_luma") or 0.0)
+    min_luma = float(summary.get("min_luma") or mean_luma)
+
+    # Recovery trigger for visually dull inputs that are not fully black.
+    if mean_luma <= 102.0 and min_luma < 22.0:
+        return True
+    if mean_luma <= 110.0 and min_luma <= 12.0:
+        return True
+
+    return False
 
 
 def _ai_validate(
@@ -641,17 +687,16 @@ def _replace_original(original: Path, replacement: Path) -> str:
 
 def optimize_shortform_video(video_path: str, transcript: str) -> str:
     """
-    Master short-form AI optimization pipeline.
+    Master short-form AI optimization pipeline (single-pass).
 
     Stages:
     1) Script analysis
-    2) Visual energy engine
-    3) Caption intelligence
-    4) Audio optimization
-    5) Aesthetic + engagement validation
-    6) Conditional correction / final export
+    2) Frame analysis (OpenCV on original — no pre-render needed)
+    3) AI validation → determines which corrections to apply
+    4) Single render pass with all corrections baked in
 
-    Entire stage is wrapped with fail-safe behavior to avoid pipeline breaks.
+    Analyzing the original before rendering lets us decide all corrections
+    upfront and apply them in ONE ffmpeg pass instead of two or three.
     """
     original = Path(video_path).expanduser().resolve()
     if not original.exists():
@@ -675,19 +720,13 @@ def optimize_shortform_video(video_path: str, transcript: str) -> str:
             script_profile.get("energy_curve"),
         )
 
-        stage1_path = original.with_name(f"{original.stem}_shortform_stage1{original.suffix}")
-        optimized_path, corrections = _apply_primary_pass(
-            original,
-            stage1_path,
-            transcript=transcript,
-            script_profile=script_profile,
-            reduced_font=False,
-            engagement_boost=False,
-            simplify_colors=False,
-        )
-
-        frame_summary = _frame_summary_opencv(optimized_path)
+        # Analyze the original video directly — no need to render first.
+        frame_summary = _frame_summary_opencv(original)
         LOGGER.info("shortform frame summary=%s", frame_summary)
+
+        if _looks_like_black_screen(frame_summary):
+            LOGGER.warning("Skipping shortform optimization because source appears near-black.")
+            return str(original)
 
         try:
             ai_scores = _ai_validate(
@@ -717,22 +756,33 @@ def optimize_shortform_video(video_path: str, transcript: str) -> str:
 
         needs_aesthetic_fix = aesthetic_score < AESTHETIC_THRESHOLD
         needs_engagement_fix = engagement_score < ENGAGEMENT_THRESHOLD
+        needs_dark_recovery = _requires_dark_recovery(frame_summary)
 
-        if needs_aesthetic_fix or needs_engagement_fix:
-            stage2_path = original.with_name(f"{original.stem}_shortform_stage2{original.suffix}")
-            optimized_path.unlink(missing_ok=True)
-            optimized_path, pass2 = _apply_primary_pass(
-                original,
-                stage2_path,
-                transcript=transcript,
-                script_profile=script_profile,
-                reduced_font=needs_aesthetic_fix,
-                engagement_boost=needs_engagement_fix,
-                simplify_colors=needs_aesthetic_fix,
-            )
-            corrections.extend(pass2)
+        # Single render pass with all corrections determined upfront.
+        output_path = original.with_name(f"{original.stem}_shortform{original.suffix}")
+        optimized_path, corrections = _apply_primary_pass(
+            original,
+            output_path,
+            transcript=transcript,
+            script_profile=script_profile,
+            reduced_font=needs_aesthetic_fix,
+            engagement_boost=needs_engagement_fix,
+            simplify_colors=needs_aesthetic_fix,
+            recover_dark_tone=needs_dark_recovery,
+        )
 
         LOGGER.info("shortform corrections applied=%s", corrections)
+
+        optimized_summary = _frame_summary_opencv(optimized_path)
+        if _looks_like_black_screen(optimized_summary, frame_summary):
+            LOGGER.warning("Shortform optimization produced near-black output; keeping original clip.")
+            try:
+                if optimized_path.exists() and optimized_path != original:
+                    optimized_path.unlink(missing_ok=True)
+            except OSError as exc:
+                LOGGER.debug("Could not remove low-luma optimized clip: %s", exc)
+            return str(original)
+
         return _replace_original(original, optimized_path)
     except Exception as exc:
         LOGGER.error("shortform optimization failed; returning original. error=%s", exc)

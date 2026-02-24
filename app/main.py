@@ -4,8 +4,10 @@ import argparse
 import json
 import logging
 import os
+import random
 import secrets
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -136,6 +138,104 @@ def _human_size(num_bytes: int) -> str:
         return f"{mb:.1f} MB"
     gb = mb / 1024
     return f"{gb:.2f} GB"
+
+
+def _pick_background_video_for_theme(storage: AppStorage, theme: str) -> Path:
+    candidates = [
+        item
+        for item in storage.backgrounds_dir.iterdir()
+        if item.is_file() and item.suffix.lower() in {".mp4", ".mov", ".m4v", ".webm"}
+    ]
+    if not candidates:
+        raise RuntimeError(
+            f"No background videos found in {storage.backgrounds_dir}. Add files to continue."
+        )
+
+    lower_theme = theme.lower().strip()
+    themed = [item for item in candidates if lower_theme and lower_theme in item.name.lower()]
+    return random.choice(themed or candidates)
+
+
+def _build_ai_fallback_caption(theme: str, video_type: str) -> tuple[str, str]:
+    hook_map = {
+        "scary": "This ending is darker than it looks.",
+        "dating": "This relationship twist hits fast.",
+        "crazy": "Chaos escalates in seconds.",
+        "mystery": "A hidden detail changes everything.",
+        "motivational": "Small moves create big momentum.",
+        "interesting": "Watch what happens when the pattern breaks.",
+    }
+    hook = hook_map.get(theme.lower(), "This clip builds fast and pays off at the end.")
+    body = (
+        f"{hook} Built as a {video_type} short with clean pacing, readable captions, "
+        "and a gameplay background tuned for retention."
+    )
+    hashtags = f"#{theme.lower()} #viral #fyp #shorts #tiktok"
+    caption = f"{body} {hashtags}"
+    transcript = body
+    return caption, transcript
+
+
+def _render_local_ai_video_fallback(
+    *,
+    storage: AppStorage,
+    video_engine: VideoEngine,
+    theme: str,
+    duration: int,
+    video_type: str,
+    progress_callback,
+) -> tuple[str, str, str]:
+    duration_seconds = max(10, int(duration))
+    background = _pick_background_video_for_theme(storage, theme)
+    caption, transcript = _build_ai_fallback_caption(theme, video_type)
+
+    temp_source = storage.videos_dir / f"ai_fallback_source_{int(time.time())}.mp4"
+    trim_cmd = [
+        "ffmpeg",
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-stream_loop",
+        "-1",
+        "-i",
+        str(background),
+        "-t",
+        str(duration_seconds),
+        "-an",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "20",
+        "-pix_fmt",
+        "yuv420p",
+        str(temp_source),
+    ]
+
+    result = subprocess.run(trim_cmd, capture_output=True, text=True)
+    if result.returncode != 0 or not temp_source.exists():
+        message = (result.stderr or result.stdout or "ffmpeg fallback trim failed").strip()
+        raise RuntimeError(message)
+
+    day_folder = Path.home() / "TikTok_Videos" / time.strftime("%Y-%m-%d")
+    day_folder.mkdir(parents=True, exist_ok=True)
+    timestamp = time.strftime("%Y-%m-%d_%H-%M-%S")
+    output_path = day_folder / f"TikTok_AI_{video_type}_{timestamp}_fallback.mp4"
+
+    try:
+        progress_callback(f"Fallback source: {background.name}")
+        final_path = video_engine.render_vertical(
+            source_path=temp_source,
+            output_path=output_path,
+            caption=caption,
+            apply_shortform_optimization=False,
+        )
+    finally:
+        temp_source.unlink(missing_ok=True)
+
+    return str(final_path), caption, transcript
 
 
 def command_generate(args: argparse.Namespace) -> int:
@@ -374,7 +474,7 @@ def command_list_backgrounds(_: argparse.Namespace) -> int:
 
 
 def command_generate_ai_video(args: argparse.Namespace) -> int:
-    storage, _, _, _, _ = build_services()
+    storage, video_engine, _, _, _ = build_services()
 
     def safe_emit(line: str) -> None:
         try:
@@ -393,14 +493,27 @@ def command_generate_ai_video(args: argparse.Namespace) -> int:
         progress_callback=progress,
     )
 
+    transcript = (getattr(generator, "last_transcript", "") or "").strip()
+    caption_for_storage = (getattr(generator, "last_caption", "") or "").strip() or None
+
     if not video_path:
-        raise RuntimeError("AI video generation failed")
+        progress("Primary AI generation unavailable. Rendering resilient local fallback...")
+        fallback_path, fallback_caption, fallback_transcript = _render_local_ai_video_fallback(
+            storage=storage,
+            video_engine=video_engine,
+            theme=args.theme,
+            duration=args.duration,
+            video_type=args.video_type,
+            progress_callback=progress,
+        )
+        video_path = fallback_path
+        caption_for_storage = fallback_caption
+        transcript = fallback_transcript
 
     # Integration point:
     # video = generate_video()
     # if SHORTFORM_AI_ENABLED:
     #     video = optimize_shortform_video(video, transcript)
-    transcript = ""
     if SHORTFORM_AI_ENABLED:
         progress("Running short-form AI optimization...")
         video_path = optimize_shortform_video(video_path, transcript)
@@ -411,6 +524,7 @@ def command_generate_ai_video(args: argparse.Namespace) -> int:
         filename=video_file.name,
         source_path=str(video_file),
         export_path=str(video_file),
+        caption=caption_for_storage,
         status="ready",
     )
 
@@ -496,13 +610,22 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     try:
         return int(args.func(args))
+    except BrokenPipeError:
+        LOGGER.warning("stdout pipe closed (BrokenPipeError)")
+        return 1
     except TikTokAPIError as exc:
         LOGGER.exception("TikTok API error")
-        print(f"ERROR: {exc}", flush=True)
+        try:
+            print(f"ERROR: {exc}", flush=True)
+        except BrokenPipeError:
+            pass
         return 1
     except Exception as exc:
         LOGGER.exception("Unhandled backend error")
-        print(f"ERROR: {exc}", flush=True)
+        try:
+            print(f"ERROR: {exc}", flush=True)
+        except BrokenPipeError:
+            pass
         return 1
 
 

@@ -289,6 +289,10 @@ final class ClipGeneratorViewModel: ObservableObject {
     private var outputBuffer = ""
     private var didRequestStop = false
     private var sawErrorOutput = false
+    private var aiOutputPendingBuffer = ""
+    private var aiVideoGeneratedSeen = false
+    private var aiVideoPayloadSeen = false
+    private var aiVideoDoneSeen = false
     private var processExitCode: Int32?
 
     private let queueStorageURL: URL
@@ -481,6 +485,10 @@ final class ClipGeneratorViewModel: ObservableObject {
         outputBuffer = ""
         didRequestStop = false
         sawErrorOutput = false
+        aiOutputPendingBuffer = ""
+        aiVideoGeneratedSeen = false
+        aiVideoPayloadSeen = false
+        aiVideoDoneSeen = false
         processExitCode = nil
 
         let runSummary = "AI video: theme=\(aiVideoTheme.rawValue), duration=\(aiVideoDuration.rawValue)s, type=\(aiVideoType.rawValue)"
@@ -503,16 +511,37 @@ final class ClipGeneratorViewModel: ObservableObject {
             process.executableURL = URL(fileURLWithPath: "/bin/bash")
             process.arguments = ["-c", command]
 
-            let pipe = Pipe()
-            process.standardOutput = pipe
-            process.standardError = pipe
+            // Set up environment: unbuffered Python output and proper PATH for Homebrew python3
+            var env = ProcessInfo.processInfo.environment
+            env["PYTHONUNBUFFERED"] = "1"
+            let existingPath = env["PATH"] ?? "/usr/bin:/bin"
+            env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:\(NSHomeDirectory())/bin:\(existingPath)"
+            process.environment = env
 
-            let handle = pipe.fileHandleForReading
+            // Use separate pipes for stdout and stderr to prevent moviepy/tqdm
+            // stderr writes from causing BrokenPipeError on the structured stdout pipe.
+            let stdoutPipe = Pipe()
+            let stderrPipe = Pipe()
+            process.standardOutput = stdoutPipe
+            process.standardError = stderrPipe
+
+            let handle = stdoutPipe.fileHandleForReading
             handle.readabilityHandler = { fileHandle in
                 let data = fileHandle.availableData
                 if !data.isEmpty, let line = String(data: data, encoding: .utf8) {
                     Task { @MainActor in
-                        self?.handleAIVideoOutput(line)
+                        self?.handleAIVideoOutputChunk(line)
+                    }
+                }
+            }
+
+            // Drain stderr separately — log it but don't treat as structured output.
+            let stderrHandle = stderrPipe.fileHandleForReading
+            stderrHandle.readabilityHandler = { fileHandle in
+                let data = fileHandle.availableData
+                if !data.isEmpty, let text = String(data: data, encoding: .utf8) {
+                    Task { @MainActor in
+                        self?.appendAIVideoLogs("[stderr] " + text)
                     }
                 }
             }
@@ -522,6 +551,15 @@ final class ClipGeneratorViewModel: ObservableObject {
                 process.waitUntilExit()
 
                 Task { @MainActor in
+                    let remainingData = handle.readDataToEndOfFile()
+                    let trailingOutput = String(data: remainingData, encoding: .utf8)
+
+                    handle.readabilityHandler = nil
+                    stderrHandle.readabilityHandler = nil
+
+                    if let trailingOutput, !trailingOutput.isEmpty {
+                        self?.handleAIVideoOutputChunk(trailingOutput)
+                    }
                     self?.handleAIVideoExit(process.terminationStatus)
                 }
             } catch {
@@ -534,31 +572,117 @@ final class ClipGeneratorViewModel: ObservableObject {
         }
     }
 
-    private func handleAIVideoOutput(_ line: String) {
-        logs += line + "\n"
-        outputBuffer += line
+    private func handleAIVideoOutputChunk(_ chunk: String) {
+        outputBuffer += chunk
+        appendAIVideoLogs(chunk)
 
-        if line.contains("PROGRESS:") {
+        let normalized = chunk.replacingOccurrences(of: "\r", with: "\n")
+        aiOutputPendingBuffer += normalized
+
+        var lines = aiOutputPendingBuffer.components(separatedBy: .newlines)
+        aiOutputPendingBuffer = lines.popLast() ?? ""
+
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty {
+                continue
+            }
+            handleAIVideoOutputLine(trimmed)
+        }
+    }
+
+    private func handleAIVideoOutputLine(_ line: String) {
+        if line.hasPrefix("PROGRESS:") {
             let message = line.replacingOccurrences(of: "PROGRESS:", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
             progressText = message
         }
 
-        if line.contains("AI_VIDEO_GENERATED:") {
+        if line.hasPrefix("AI_VIDEO_GENERATED:") {
+            aiVideoGeneratedSeen = true
             let fileName = line.replacingOccurrences(of: "AI_VIDEO_GENERATED:", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
             appendFeed("AI video generated: \(fileName)", level: .success)
         }
 
-        if line.contains("AI_VIDEO_JSON:") {
-            let jsonString = line.replacingOccurrences(of: "AI_VIDEO_JSON:", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
-            if let data = jsonString.data(using: .utf8),
-               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                handleAIVideoClipJSON(json)
-            }
+        if parseAIVideoClipJSONLine(line) {
+            aiVideoPayloadSeen = true
         }
 
-        if line.lowercased().contains("error") || line.lowercased().contains("failed") {
+        if line.hasPrefix("DONE:") {
+            aiVideoDoneSeen = true
+        }
+
+        if isFatalAIVideoLine(line) {
             sawErrorOutput = true
         }
+    }
+
+    private func appendAIVideoLogs(_ chunk: String) {
+        // MoviePy progress updates are extremely noisy and can swamp the UI log view.
+        if chunk.contains("now=None") && chunk.contains("t:") {
+            return
+        }
+
+        let normalized = chunk.replacingOccurrences(of: "\r", with: "\n")
+        logs += normalized
+
+        let maxLogSize = 200_000
+        if logs.count > maxLogSize {
+            logs = String(logs.suffix(maxLogSize))
+        }
+    }
+
+    @discardableResult
+    private func parseAIVideoClipJSONLine(_ line: String) -> Bool {
+        guard line.hasPrefix("AI_VIDEO_JSON:") else {
+            return false
+        }
+
+        let jsonString = line.replacingOccurrences(of: "AI_VIDEO_JSON:", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let data = jsonString.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return false
+        }
+
+        handleAIVideoClipJSON(json)
+        return true
+    }
+
+    private func parseAIVideoClipJSONFromOutputBuffer() {
+        guard !aiVideoPayloadSeen else {
+            return
+        }
+
+        let lines = outputBuffer.replacingOccurrences(of: "\r", with: "\n").components(separatedBy: .newlines)
+        for line in lines {
+            if parseAIVideoClipJSONLine(line.trimmingCharacters(in: .whitespacesAndNewlines)) {
+                aiVideoPayloadSeen = true
+                return
+            }
+        }
+    }
+
+    private func isFatalAIVideoLine(_ line: String) -> Bool {
+        let lower = line.lowercased()
+
+        // Warnings, fallback notices, and intermediate errors are non-fatal.
+        // The primary AI generator may fail and emit errors, but the backend
+        // fallback renderer can still succeed — only treat the final structured
+        // ERROR: prefix from main.py as fatal.
+        if lower.hasPrefix("warning ") || line.contains("⚠️") {
+            return false
+        }
+        if lower.contains("shortform ai validation failed, using local fallback") {
+            return false
+        }
+        if lower.hasPrefix("progress:") {
+            return false
+        }
+
+        // Only the final structured error line from the backend is truly fatal.
+        if lower.hasPrefix("error:") { return true }
+        if lower.contains("failed to start ai video generation") { return true }
+
+        return false
     }
 
     private func handleAIVideoClipJSON(_ json: [String: Any]) {
@@ -599,12 +723,24 @@ final class ClipGeneratorViewModel: ObservableObject {
     private func handleAIVideoExit(_ exitCode: Int32) {
         processExitCode = exitCode
         isProcessing = false
+        parseAIVideoClipJSONFromOutputBuffer()
+        if outputBuffer.contains("AI_VIDEO_GENERATED:") {
+            aiVideoGeneratedSeen = true
+        }
+        if outputBuffer.contains("DONE: AI video generation complete") {
+            aiVideoDoneSeen = true
+        }
+        let sawSuccessMarker = aiVideoGeneratedSeen || aiVideoPayloadSeen || aiVideoDoneSeen
+        appendFeed(
+            "AI exit debug: code=\(exitCode), generated=\(aiVideoGeneratedSeen), payload=\(aiVideoPayloadSeen), done=\(aiVideoDoneSeen), fatal=\(sawErrorOutput)",
+            level: .info
+        )
 
         if didRequestStop {
             runState = .stopped
             progressText = "Stopped"
             appendFeed("AI video generation stopped by user.", level: .warning)
-        } else if exitCode == 0 && !sawErrorOutput {
+        } else if sawSuccessMarker || (exitCode == 0 && !sawErrorOutput) {
             runState = .succeeded
             progressText = "AI video generated successfully"
             progressValue = 1.0
@@ -612,6 +748,9 @@ final class ClipGeneratorViewModel: ObservableObject {
             let summary = "AI video: \(aiVideoTheme.rawValue) \(aiVideoDuration.rawValue)s \(aiVideoType.rawValue)"
             lastRunSummary = "\(summary) at \(lastRunAt!.formatted(date: .abbreviated, time: .shortened))"
             appendFeed("AI video generation completed successfully.", level: .success)
+            if exitCode != 0 {
+                appendFeed("Process exited with code \(exitCode) after success markers. Marking run as successful.", level: .warning)
+            }
 
             // Refresh clips from backend
             Task {

@@ -264,6 +264,7 @@ Dialogue: 0,0:00:00.00,{self._format_ass_timestamp(duration_seconds)},Caption,,0
         output_path: Path,
         caption: Optional[str] = None,
         background_path: Optional[Path] = None,
+        apply_shortform_optimization: bool = True,
     ) -> Path:
         if not source_path.exists():
             raise RuntimeError(f"Source video not found: {source_path}")
@@ -284,7 +285,7 @@ Dialogue: 0,0:00:00.00,{self._format_ass_timestamp(duration_seconds)},Caption,,0
             "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=30:15[srcblur]",
             "[bg][srcblur]blend=all_mode='overlay':all_opacity=0.35[base]",
             "[0:v]scale='if(gt(iw,1080),1080,iw)':'if(gt(ih,1728),1728,ih)':force_original_aspect_ratio=decrease,setsar=1[fg]",
-            "[base][fg]overlay=(W-w)/2:(H-h)/2:shortest=1[vtmp]",
+            "[base][fg]overlay=(W-w)/2:(H-h)/2:shortest=1,eq=contrast=1.04:saturation=1.06:brightness=0.02[vtmp]",
         ]
 
         ass_file: Optional[Path] = None
@@ -320,7 +321,7 @@ Dialogue: 0,0:00:00.00,{self._format_ass_timestamp(duration_seconds)},Caption,,0
             "-c:v",
             "libx264",
             "-preset",
-            "medium",
+            "fast",
             "-crf",
             "18",
             "-pix_fmt",
@@ -344,7 +345,7 @@ Dialogue: 0,0:00:00.00,{self._format_ass_timestamp(duration_seconds)},Caption,,0
         if ass_file and ass_file.exists():
             ass_file.unlink(missing_ok=True)
 
-        if not SHORTFORM_AI_ENABLED:
+        if not apply_shortform_optimization or not SHORTFORM_AI_ENABLED:
             return output_path
 
         # Short-form optimizer is fail-safe by design; on failure it returns the original path.
