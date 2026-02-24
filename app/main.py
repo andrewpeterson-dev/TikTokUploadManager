@@ -376,8 +376,14 @@ def command_list_backgrounds(_: argparse.Namespace) -> int:
 def command_generate_ai_video(args: argparse.Namespace) -> int:
     storage, _, _, _, _ = build_services()
 
+    def safe_emit(line: str) -> None:
+        try:
+            print(line, flush=True)
+        except BrokenPipeError:
+            LOGGER.warning("stdout pipe closed while emitting AI video progress/output")
+
     def progress(message: str) -> None:
-        print(f"PROGRESS: {message}", flush=True)
+        safe_emit(f"PROGRESS: {message}")
 
     generator = AIVideoGenerator()
     video_path = generator.generate_video(
@@ -423,9 +429,9 @@ def command_generate_ai_video(args: argparse.Namespace) -> int:
         "videoType": args.video_type,
     }
 
-    print(f"AI_VIDEO_GENERATED: {video_file.name}", flush=True)
-    print(f"AI_VIDEO_JSON: {json.dumps(payload)}", flush=True)
-    print(f"DONE: AI video generation complete", flush=True)
+    safe_emit(f"AI_VIDEO_GENERATED: {video_file.name}")
+    safe_emit(f"AI_VIDEO_JSON: {json.dumps(payload)}")
+    safe_emit("DONE: AI video generation complete")
 
     return 0
 

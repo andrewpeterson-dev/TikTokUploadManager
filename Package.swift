@@ -15,14 +15,7 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "TikTokUploadManager",
-            path: ".",
-            sources: [
-                "ContentView.swift",
-                "ViewModels",
-                "Models",
-                "Services",
-                "TikTokUploadManagerApp.swift"
-            ]
+            path: "Sources"
         )
     ]
 )

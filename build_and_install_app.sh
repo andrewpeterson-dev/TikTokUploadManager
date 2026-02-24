@@ -15,13 +15,13 @@ ICON_SOURCE="$PROJECT_DIR/Resources/app_icon.png"
 mkdir -p "$BUILD_DIR"
 
 xcrun swiftc \
-  "$PROJECT_DIR/TikTokUploadManagerApp.swift" \
-  "$PROJECT_DIR/ContentView.swift" \
-  "$PROJECT_DIR/ViewModels/ClipGeneratorViewModel.swift" \
-  "$PROJECT_DIR/ViewModels/FeaturesViewModel.swift" \
-  "$PROJECT_DIR/Services/PythonProcessService.swift" \
-  "$PROJECT_DIR/Services/TikTokFeaturesService.swift" \
-  "$PROJECT_DIR/Models/Clip.swift" \
+  "$PROJECT_DIR/Sources/TikTokUploadManager/TikTokUploadManagerApp.swift" \
+  "$PROJECT_DIR/Sources/TikTokUploadManager/ContentView.swift" \
+  "$PROJECT_DIR/Sources/TikTokUploadManager/ViewModels/ClipGeneratorViewModel.swift" \
+  "$PROJECT_DIR/Sources/TikTokUploadManager/ViewModels/FeaturesViewModel.swift" \
+  "$PROJECT_DIR/Sources/TikTokUploadManager/Services/PythonProcessService.swift" \
+  "$PROJECT_DIR/Sources/TikTokUploadManager/Services/TikTokFeaturesService.swift" \
+  "$PROJECT_DIR/Sources/TikTokUploadManager/Models/Clip.swift" \
   -o "$BUILD_DIR/$EXECUTABLE_NAME" \
   -framework SwiftUI \
   -framework AppKit \

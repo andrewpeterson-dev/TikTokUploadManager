@@ -359,7 +359,7 @@ final class ClipGeneratorViewModel: ObservableObject {
         let trimmedURL = videoURL.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmedURL.starts(with: "http://") && !trimmedURL.starts(with: "https://") {
             // This appears to be a local file path
-            let filePath = trimmedURL.expandingTildeInPath
+            let filePath = NSString(string: trimmedURL).expandingTildeInPath
             if !FileManager.default.fileExists(atPath: filePath) {
                 progressText = "Video file not found"
                 runState = .failed
@@ -473,15 +473,67 @@ final class ClipGeneratorViewModel: ObservableObject {
     }
 
     func generateAIVideo() {
-        // TODO: Implement AI Video backend
-        isProcessing = false
-        runState = .failed
-        progressText = "AI Video backend not implemented yet"
-        appendFeed("AI Video feature coming soon. Backend needs to be created.", level: .warning)
+        isProcessing = true
+        runState = .running
+        progressText = "Generating AI video..."
+        progressValue = 0
+        logs = ""
+        outputBuffer = ""
+        didRequestStop = false
+        sawErrorOutput = false
+        processExitCode = nil
+
+        let runSummary = "AI video: theme=\(aiVideoTheme.rawValue), duration=\(aiVideoDuration.rawValue)s, type=\(aiVideoType.rawValue)"
+        appendFeed("AI video generation started (\(runSummary)).", level: .info)
+
+        // Run the backend command
+        let args = [
+            "generate-ai-video",
+            "--theme", aiVideoTheme.rawValue,
+            "--duration", "\(aiVideoDuration.rawValue)",
+            "--video-type", aiVideoType.rawValue
+        ]
+
+        // Use bash to run python command from project root (not app subdirectory)
+        let backendPath = NSHomeDirectory() + "/TikTokUploadManager"
+        let command = "cd '\(backendPath)' && python3 -m app.main \(args.joined(separator: " "))"
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/bin/bash")
+            process.arguments = ["-c", command]
+
+            let pipe = Pipe()
+            process.standardOutput = pipe
+            process.standardError = pipe
+
+            let handle = pipe.fileHandleForReading
+            handle.readabilityHandler = { fileHandle in
+                let data = fileHandle.availableData
+                if !data.isEmpty, let line = String(data: data, encoding: .utf8) {
+                    Task { @MainActor in
+                        self?.handleAIVideoOutput(line)
+                    }
+                }
+            }
+
+            do {
+                try process.run()
+                process.waitUntilExit()
+
+                Task { @MainActor in
+                    self?.handleAIVideoExit(process.terminationStatus)
+                }
+            } catch {
+                Task { @MainActor in
+                    self?.appendFeed("Failed to start AI video generation: \(error)", level: .error)
+                    self?.isProcessing = false
+                    self?.runState = .failed
+                }
+            }
+        }
     }
 
-    // TODO: Implement these when AI Video backend is ready
-    /*
     private func handleAIVideoOutput(_ line: String) {
         logs += line + "\n"
         outputBuffer += line
@@ -517,7 +569,15 @@ final class ClipGeneratorViewModel: ObservableObject {
             return
         }
 
-        let durationInt = (json["duration"] as? String).flatMap({ Int($0) }) ?? 0
+        let durationInt: Int = {
+            if let value = json["duration"] as? Int {
+                return value
+            }
+            if let value = json["duration"] as? String, let parsed = Int(value) {
+                return parsed
+            }
+            return 0
+        }()
         let size = json["size"] as? String ?? "0 B"
 
         let clip = Clip(
@@ -547,31 +607,6 @@ final class ClipGeneratorViewModel: ObservableObject {
         } else if exitCode == 0 && !sawErrorOutput {
             runState = .succeeded
             progressText = "AI video generated successfully"
-            progressValue = 1.0
-            lastRunAt = Date()
-            let summary = "AI video: \(aiVideoTheme.rawValue) \(aiVideoDuration.rawValue)s \(aiVideoType.rawValue)"
-            lastRunSummary = "\(summary) at \(lastRunAt!.formatted(date: .abbreviated, time: .shortened))"
-            appendFeed("AI video generation completed successfully.", level: .success)
-
-            // Refresh clips from backend
-            Task {
-                try await Task.sleep(for: .seconds(1))
-                await MainActor.run {
-                    self.refreshGeneratedClipsFromBackend()
-                }
-            }
-        } else {
-            runState = .failed
-            progressText = "AI video generation failed"
-            progressValue = nil
-            appendFeed("AI video generation failed with exit code \(exitCode).", level: .error)
-
-            if sawErrorOutput {
-                appendFeed("Check the output log for detailed error messages.", level: .warning)
-            }
-        }
-    }
-    */
             progressValue = 1.0
             lastRunAt = Date()
             let summary = "AI video: \(aiVideoTheme.rawValue) \(aiVideoDuration.rawValue)s \(aiVideoType.rawValue)"

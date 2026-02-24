@@ -494,8 +494,8 @@ final class ClipGeneratorViewModel: ObservableObject {
             "--video-type", aiVideoType.rawValue
         ]
 
-        // Use bash to run python command in backend directory
-        let backendPath = NSHomeDirectory() + "/TikTokUploadManager/app"
+        // Use bash to run python command from project root (not app subdirectory)
+        let backendPath = NSHomeDirectory() + "/TikTokUploadManager"
         let command = "cd '\(backendPath)' && python3 -m app.main \(args.joined(separator: " "))"
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -569,7 +569,15 @@ final class ClipGeneratorViewModel: ObservableObject {
             return
         }
 
-        let durationInt = (json["duration"] as? String).flatMap({ Int($0) }) ?? 0
+        let durationInt: Int = {
+            if let value = json["duration"] as? Int {
+                return value
+            }
+            if let value = json["duration"] as? String, let parsed = Int(value) {
+                return parsed
+            }
+            return 0
+        }()
         let size = json["size"] as? String ?? "0 B"
 
         let clip = Clip(

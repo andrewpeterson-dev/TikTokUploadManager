@@ -12,3 +12,6 @@ node_modules/
 backgrounds/
 app/media/
 build/
+generated_content/
+logs/app.log
+TikTok_AI_*.mp4
