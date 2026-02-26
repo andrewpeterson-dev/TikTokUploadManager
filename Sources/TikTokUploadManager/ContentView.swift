@@ -191,7 +191,9 @@ struct ContentView: View {
             }
             .pickerStyle(.segmented)
 
-            if vm.sourceMode != .aiVideo {
+            if vm.sourceMode == .importUpload {
+                importUploadInputSection
+            } else if vm.sourceMode != .aiVideo {
                 HStack(spacing: 8) {
                     TextField("Paste video URL or file path", text: $vm.videoURL)
                         .textFieldStyle(.roundedBorder)
@@ -215,7 +217,9 @@ struct ContentView: View {
             Text("Settings")
                 .font(.headline)
 
-            if vm.sourceMode == .aiVideo {
+            if vm.sourceMode == .importUpload {
+                importUploadSettingsSection
+            } else if vm.sourceMode == .aiVideo {
                 aiVideoSettingsSection
             } else {
                 regularClipSettingsSection
@@ -480,13 +484,139 @@ struct ContentView: View {
         }
     }
 
+    private var importUploadInputSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Button("Select Videos") {
+                    vm.pickMultipleVideoFiles()
+                }
+                .buttonStyle(.bordered)
+
+                if !vm.importVideoPaths.isEmpty {
+                    Text("\(vm.importVideoPaths.count) video\(vm.importVideoPaths.count == 1 ? "" : "s") selected")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+
+                    Spacer()
+
+                    Button("Clear All") {
+                        vm.importVideoPaths = []
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.red)
+                }
+            }
+
+            if !vm.importVideoPaths.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(Array(vm.importVideoPaths.enumerated()), id: \.offset) { index, path in
+                        HStack(spacing: 6) {
+                            Image(systemName: "film")
+                                .foregroundStyle(.secondary)
+                                .font(.caption)
+                            Text(URL(fileURLWithPath: path).lastPathComponent)
+                                .font(.caption)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+
+                            Spacer()
+
+                            Button {
+                                vm.removeImportVideo(at: index)
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundStyle(.secondary)
+                                    .font(.caption)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+                .padding(8)
+                .background(Color(NSColor.controlBackgroundColor))
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+            } else {
+                Text("Select one or more videos to import and auto-upload to TikTok")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .padding(.vertical, 8)
+            }
+        }
+    }
+
+    private var importUploadSettingsSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Caption Theme")
+                .font(.subheadline)
+                .fontWeight(.medium)
+
+            Picker("Theme", selection: $vm.importTheme) {
+                ForEach(ClipGeneratorViewModel.AIVideoTheme.allCases) { theme in
+                    Text(theme.title).tag(theme)
+                }
+            }
+            .pickerStyle(.menu)
+
+            Text("Captions are auto-generated based on the selected theme.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("What happens")
+                    .font(.subheadline)
+                    .fontWeight(.medium)
+                    .foregroundColor(.blue)
+
+                HStack(spacing: 4) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundColor(.green)
+                        .font(.caption)
+                    Text("AI caption generated for each video")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                HStack(spacing: 4) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundColor(.green)
+                        .font(.caption)
+                    Text("Videos imported to library")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                HStack(spacing: 4) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundColor(.green)
+                        .font(.caption)
+                    Text("Queued and uploaded to TikTok automatically")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    private var actionButtonLabel: String {
+        switch vm.sourceMode {
+        case .aiVideo:
+            return "Generate AI Video"
+        case .importUpload:
+            return "Import & Upload"
+        default:
+            return "Generate Clips"
+        }
+    }
+
     private var actionSection: some View {
         HStack(spacing: 12) {
-            Button(vm.sourceMode == .aiVideo ? "Generate AI Video" : "Generate Clips") {
+            Button(actionButtonLabel) {
                 vm.generateClips()
             }
             .buttonStyle(.borderedProminent)
-            .disabled(vm.isProcessing)
+            .disabled(vm.isProcessing || (vm.sourceMode == .importUpload && vm.importVideoPaths.isEmpty))
 
             if vm.isProcessing {
                 Button("Stop") {

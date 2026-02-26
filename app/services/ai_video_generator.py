@@ -307,7 +307,25 @@ class AIVideoGenerator:
             music_intensity=min(0.85, float(profile.music_intensity)),
         )
 
-        if any(issue == "clipping_or_black_screen" for issue in report.issues):
+        if any("clipping_or_black_screen" in issue for issue in report.issues):
+            profile = replace(profile, motion_intensity=0.0, color_grade="clean")
+
+        if any("resolution_not_standard" in issue for issue in report.issues):
+            profile = replace(profile, motion_intensity=0.15, music_intensity=0.2, caption_style="minimal")
+
+        if any("aspect_ratio_off" in issue for issue in report.issues):
+            profile = replace(profile, motion_intensity=0.18, color_grade="clean")
+
+        if any("frame_rate_off_" in issue for issue in report.issues):
+            profile = replace(profile, motion_intensity=min(profile.motion_intensity, 0.2))
+
+        if any(issue == "caption_parse_failure" for issue in report.issues):
+            profile = replace(profile, caption_style="minimal")
+
+        if any("codec_mismatch" in issue for issue in report.issues):
+            profile = replace(profile, color_grade="clean")
+
+        if any("video_profile_" in issue for issue in report.issues):
             profile = replace(profile, motion_intensity=0.0, color_grade="clean")
 
         if report.corrections.get("motion_intensity") is not None:
@@ -325,9 +343,10 @@ class AIVideoGenerator:
         output_path: Path,
         max_attempts: int = 2,
         attempt: int = 0,
+        strict: bool = False,
     ) -> Path:
         if attempt >= max_attempts:
-            return base_video_path
+            return output_path if strict else base_video_path
 
         duration = self._probe_duration(base_video_path)
         if duration <= 0:
@@ -350,6 +369,7 @@ class AIVideoGenerator:
             "crop=1080:1920",
             "setsar=1",
             motion_filter,
+            "fps=60",
             color_filter,
         ]
         if caption_ass and caption_ass.exists():
@@ -411,7 +431,7 @@ class AIVideoGenerator:
         corrected = self.apply_quality_profile(profile, report)
         if corrected == profile:
             if "clipping_or_black_screen" in report.issues:
-                return base_video_path
+                return output_path if strict else base_video_path
             return output_path
 
         retry_name = output_path.with_name(f"{output_path.stem}_retry_{attempt + 1}.mp4")
@@ -422,6 +442,7 @@ class AIVideoGenerator:
             output_path=retry_name,
             max_attempts=max_attempts,
             attempt=attempt + 1,
+            strict=strict,
         )
 
     def generate_video(
@@ -430,6 +451,8 @@ class AIVideoGenerator:
         duration: int = 60,
         video_type: VideoType = "story",
         progress_callback: Optional[Callable[[str], None]] = None,
+        strict_quality: bool = True,
+        strict_retries: int = 1,
     ) -> Optional[str]:
         """
         Generate an AI video with the requested type using the full style engine.
@@ -462,12 +485,43 @@ class AIVideoGenerator:
                 progress_callback(
                     f"🎛️ Applying style profile ({profile.color_grade}/{profile.caption_style})"
                 )
-            return str(self._build_styled_video(
+            styled_path = self._build_styled_video(
                 base_video_path=base_video_path,
                 transcript=transcript,
                 profile=profile,
                 output_path=output_path,
-            ))
+                strict=strict_quality,
+            )
+
+            report = self.validate_quality(styled_path, transcript)
+            if report.ok:
+                return str(styled_path)
+
+            if not strict_quality:
+                return str(styled_path)
+
+            if progress_callback:
+                progress_callback(
+                    "⚠️ AI quality gate failed. Retrying with conservative quality profile."
+                )
+
+            current_profile = profile
+            for _ in range(max(0, strict_retries)):
+                current_profile = self.apply_quality_profile(current_profile, report)
+                retry_name = styled_path.with_name(f"{styled_path.stem}_quality_retry.mp4")
+                styled_path = self._build_styled_video(
+                    base_video_path=base_video_path,
+                    transcript=transcript,
+                    profile=current_profile,
+                    output_path=retry_name,
+                    strict=True,
+                )
+                report = self.validate_quality(styled_path, transcript)
+                if report.ok:
+                    return str(styled_path)
+
+            return str(styled_path)
+
         except Exception:
             LOGGER.exception("AI style pipeline failed; returning base render.")
             return str(base_video_path)

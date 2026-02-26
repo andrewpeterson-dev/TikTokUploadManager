@@ -43,7 +43,4 @@ def build_motion_filter(profile: StyleProfile) -> str:
         f"crop=1080:1920:{x_expr}:{y_expr}",
     ]
 
-    if intensity > 0.5:
-        filter_chain.append("fps=60")
-
     return ",".join(filter_chain)

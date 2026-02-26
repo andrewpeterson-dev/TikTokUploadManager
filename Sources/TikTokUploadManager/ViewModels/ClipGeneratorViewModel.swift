@@ -10,6 +10,7 @@ final class ClipGeneratorViewModel: ObservableObject {
         case url = "URL"
         case filePath = "File Path"
         case aiVideo = "AI Video"
+        case importUpload = "Import & Upload"
 
         var id: String { rawValue }
     }
@@ -265,6 +266,10 @@ final class ClipGeneratorViewModel: ObservableObject {
     @Published var aiVideoDuration: AIVideoDuration = .sixty
     @Published var aiVideoType: AIVideoType = .story
 
+    // Import & Upload settings
+    @Published var importVideoPaths: [String] = []
+    @Published var importTheme: AIVideoTheme = .interesting
+
     @Published var isProcessing = false
     @Published var progressText = "Idle"
     @Published var progressValue: Double? = nil
@@ -344,10 +349,203 @@ final class ClipGeneratorViewModel: ObservableObject {
         }
     }
 
+    func pickMultipleVideoFiles() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = true
+        panel.allowedContentTypes = [
+            .mpeg4Movie,
+            .quickTimeMovie,
+            .avi,
+            .movie,
+            .mpeg2Video,
+            .video
+        ]
+
+        if panel.runModal() == .OK {
+            importVideoPaths = panel.urls.map { $0.path }
+        }
+    }
+
+    func removeImportVideo(at index: Int) {
+        guard importVideoPaths.indices.contains(index) else { return }
+        importVideoPaths.remove(at: index)
+    }
+
+    func importAndUploadVideos() {
+        guard !importVideoPaths.isEmpty else {
+            progressText = "Select at least one video file."
+            runState = .failed
+            appendFeed("Import blocked: no video files selected.", level: .warning)
+            return
+        }
+
+        isProcessing = true
+        runState = .running
+        progressText = "Importing videos..."
+        progressValue = 0
+        logs = ""
+        outputBuffer = ""
+        didRequestStop = false
+        sawErrorOutput = false
+        aiOutputPendingBuffer = ""
+        aiVideoGeneratedSeen = false
+        aiVideoPayloadSeen = false
+        aiVideoDoneSeen = false
+        processExitCode = nil
+
+        appendFeed("Import & Upload started for \(importVideoPaths.count) video(s).", level: .info)
+
+        var args = ["import-upload", "--theme", importTheme.rawValue, "--process-now", "--videos"]
+        args += importVideoPaths
+
+        let backendPath = NSHomeDirectory() + "/TikTokUploadManager"
+        let quotedArgs = args.map { "'\($0.replacingOccurrences(of: "'", with: "'\\''"))'" }.joined(separator: " ")
+        let command = "cd '\(backendPath)' && python3 -m app.main \(quotedArgs)"
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/bin/bash")
+            process.arguments = ["-c", command]
+
+            var env = ProcessInfo.processInfo.environment
+            env["PYTHONUNBUFFERED"] = "1"
+            let existingPath = env["PATH"] ?? "/usr/bin:/bin"
+            env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:\(NSHomeDirectory())/bin:\(existingPath)"
+            process.environment = env
+
+            let stdoutPipe = Pipe()
+            let stderrPipe = Pipe()
+            process.standardOutput = stdoutPipe
+            process.standardError = stderrPipe
+
+            let handle = stdoutPipe.fileHandleForReading
+            handle.readabilityHandler = { fileHandle in
+                let data = fileHandle.availableData
+                if !data.isEmpty, let line = String(data: data, encoding: .utf8) {
+                    Task { @MainActor in
+                        self?.handleImportOutputChunk(line)
+                    }
+                }
+            }
+
+            let stderrHandle = stderrPipe.fileHandleForReading
+            stderrHandle.readabilityHandler = { fileHandle in
+                let data = fileHandle.availableData
+                if !data.isEmpty, let text = String(data: data, encoding: .utf8) {
+                    Task { @MainActor in
+                        self?.appendAIVideoLogs("[stderr] " + text)
+                    }
+                }
+            }
+
+            do {
+                try process.run()
+                process.waitUntilExit()
+
+                Task { @MainActor in
+                    let remainingData = handle.readDataToEndOfFile()
+                    let trailingOutput = String(data: remainingData, encoding: .utf8)
+
+                    handle.readabilityHandler = nil
+                    stderrHandle.readabilityHandler = nil
+
+                    if let trailingOutput, !trailingOutput.isEmpty {
+                        self?.handleImportOutputChunk(trailingOutput)
+                    }
+                    self?.handleImportExit(process.terminationStatus)
+                }
+            } catch {
+                Task { @MainActor in
+                    self?.appendFeed("Failed to start import: \(error)", level: .error)
+                    self?.isProcessing = false
+                    self?.runState = .failed
+                }
+            }
+        }
+    }
+
+    private func handleImportOutputChunk(_ chunk: String) {
+        outputBuffer += chunk
+        appendAIVideoLogs(chunk)
+
+        let normalized = chunk.replacingOccurrences(of: "\r", with: "\n")
+        aiOutputPendingBuffer += normalized
+
+        var lines = aiOutputPendingBuffer.components(separatedBy: .newlines)
+        aiOutputPendingBuffer = lines.popLast() ?? ""
+
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty { continue }
+            handleImportOutputLine(trimmed)
+        }
+    }
+
+    private func handleImportOutputLine(_ line: String) {
+        if line.hasPrefix("PROGRESS:") {
+            let message = line.replacingOccurrences(of: "PROGRESS:", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
+            progressText = message
+        }
+
+        if line.hasPrefix("IMPORT_JSON:") {
+            let jsonString = line.replacingOccurrences(of: "IMPORT_JSON:", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
+            if let data = jsonString.data(using: .utf8),
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let fileName = json["fileName"] as? String {
+                appendFeed("Imported \(fileName)", level: .success)
+            }
+        }
+
+        if line.hasPrefix("DONE:") {
+            aiVideoDoneSeen = true
+        }
+
+        if line.hasPrefix("ERROR:") {
+            sawErrorOutput = true
+        }
+    }
+
+    private func handleImportExit(_ status: Int32) {
+        isProcessing = false
+        processExitCode = status
+
+        if didRequestStop {
+            runState = .stopped
+            progressText = "Stopped"
+            appendFeed("Import stopped by user.", level: .warning)
+            return
+        }
+
+        if status != 0 || sawErrorOutput {
+            runState = .failed
+            progressText = "Import failed"
+            appendFeed("Import failed. Check logs for details.", level: .error)
+        } else {
+            runState = .succeeded
+            progressValue = 1
+            lastRunAt = Date()
+            let count = importVideoPaths.count
+            progressText = "Imported \(count) video\(count == 1 ? "" : "s")"
+            lastRunSummary = "Imported & queued \(count) video\(count == 1 ? "" : "s") for upload."
+            appendFeed(lastRunSummary, level: .success)
+            importVideoPaths = []
+        }
+
+        refreshGeneratedClipsFromBackend()
+    }
+
     func generateClips() {
         // Handle AI Video generation separately
         if sourceMode == .aiVideo {
             generateAIVideo()
+            return
+        }
+
+        // Handle Import & Upload separately
+        if sourceMode == .importUpload {
+            importAndUploadVideos()
             return
         }
 

@@ -32,7 +32,7 @@ def _probe(video_path: Path) -> Dict[str, object]:
             "-v",
             "error",
             "-show_entries",
-            "stream=width,height,codec_type",
+            "stream=index,codec_name,codec_type,profile,width,height,avg_frame_rate,r_frame_rate,channels",
             "-show_entries",
             "format=duration,bit_rate",
             "-of",
@@ -74,21 +74,50 @@ def _detect_black_content(video_path: Path) -> bool:
     return max_black >= 0.6
 
 
+def _to_float_ratio(value: str) -> float:
+    if not value:
+        return 0.0
+    if "/" in value:
+        top, bottom = value.split("/", 1)
+        try:
+            num = float(top)
+            den = float(bottom)
+        except ValueError:
+            return 0.0
+        if den == 0.0:
+            return 0.0
+        return num / den
+    try:
+        return float(value)
+    except ValueError:
+        return 0.0
+
+
 def validate_render(video_path: Path, transcript: str = "", *, min_width: int = 1080, min_height: int = 1920) -> QualityReport:
     if not video_path.exists():
         return QualityReport(False, ["missing_file"], {})
 
     payload = _probe(video_path)
     format_info = payload.get("format") or {}
+    frame_rate = 0.0
     width = 0
     height = 0
     has_audio = False
+    video_profile = ""
+    codec_name = ""
+
     for stream in payload.get("streams", []) or []:
         if not isinstance(stream, dict):
             continue
         if stream.get("codec_type") == "video":
             width = int(stream.get("width") or 0)
             height = int(stream.get("height") or 0)
+            codec_name = str(stream.get("codec_name") or "").lower()
+            profile_value = stream.get("profile")
+            video_profile = str(profile_value or "").lower()
+            frame_rate = _to_float_ratio(str(stream.get("avg_frame_rate") or ""))
+            if frame_rate <= 0.0:
+                frame_rate = _to_float_ratio(str(stream.get("r_frame_rate") or ""))
         if stream.get("codec_type") == "audio":
             has_audio = True
 
@@ -101,6 +130,10 @@ def validate_render(video_path: Path, transcript: str = "", *, min_width: int = 
     if not width or not height:
         issues.append("missing_video_stream")
     else:
+        if codec_name and codec_name != "h264":
+            issues.append(f"codec_mismatch_{codec_name}")
+        if video_profile and video_profile != "high":
+            issues.append(f"video_profile_{video_profile}")
         if width != min_width or height != min_height:
             issues.append(f"resolution_not_standard_{width}x{height}")
             corrections["crf"] = 20
@@ -119,6 +152,10 @@ def validate_render(video_path: Path, transcript: str = "", *, min_width: int = 
     if bitrate and bitrate < 2_500_000:
         issues.append(f"bitrate_too_low_{bitrate}")
         corrections["bitrate"] = 7_000_000
+
+    if frame_rate and abs(frame_rate - 60.0) > 2.5:
+        issues.append(f"frame_rate_off_{frame_rate:.2f}")
+        corrections["fps"] = 60
 
     chunks = chunk_transcript_for_subtitle(transcript or "")
     if any(len(chunk.split()) > 4 for chunk in chunks):

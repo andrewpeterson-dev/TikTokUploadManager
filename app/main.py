@@ -32,6 +32,7 @@ try:
     from app.services.shortform_ai_engine import SHORTFORM_AI_ENABLED, optimize_shortform_video
     from app.services.ai_video_generator import AIVideoGenerator
     from app.services.style_profiles import get_available_video_types as get_available_ai_video_types
+    from app.services.quality_validator import validate_render
 except ModuleNotFoundError:
     project_root = APP_ROOT.parent
     if str(project_root) not in sys.path:
@@ -44,6 +45,7 @@ except ModuleNotFoundError:
     from services.shortform_ai_engine import SHORTFORM_AI_ENABLED, optimize_shortform_video
     from services.ai_video_generator import AIVideoGenerator
     from services.style_profiles import get_available_video_types as get_available_ai_video_types
+    from services.quality_validator import validate_render
 
 try:
     from app.services.cinematic_engine import CinematicConfig, cinematic_render, config_from_analysis
@@ -526,12 +528,13 @@ def command_generate_ai_video(args: argparse.Namespace) -> int:
 
     # Skip extra re-encoding when AI style pipeline already delivered a styled render.
     output_is_ai_styled = Path(video_path).name.endswith("_styled.mp4")
+    output_file = Path(video_path)
 
     # Cinematic engine — single-pass render with grading, motion, grain, etc.
     if CINEMATIC_ENABLED and not output_is_ai_styled:
         try:
             progress("Running cinematic render engine...")
-            video_file_path = Path(video_path)
+            video_file_path = output_file
             duration_for_analysis = float(args.duration)
             script_profile = analyze_script(transcript, duration_for_analysis)
             frame_summary = analyze_frames(video_path)
@@ -546,6 +549,33 @@ def command_generate_ai_video(args: argparse.Namespace) -> int:
         except Exception as exc:
             LOGGER.warning("Cinematic engine failed, falling through: %s", exc)
 
+    # Re-check quality after cinematic/shortcut post-processing.
+    output_file = Path(video_path)
+    final_report = validate_render(output_file, transcript=transcript)
+    if not final_report.ok:
+        issues = ", ".join(final_report.issues) if final_report.issues else "unknown issues"
+        progress(f"⚠️ AI output quality check failed: {issues}")
+        # Conservative fallback: if styled AI content still fails hard checks, re-create locally.
+        if output_is_ai_styled:
+            progress("Regenerating via local cinematic fallback to guarantee safe export quality.")
+            try:
+                fallback_path, fallback_caption, fallback_transcript = _render_local_ai_video_fallback(
+                    storage=storage,
+                    video_engine=video_engine,
+                    theme=args.theme,
+                    duration=args.duration,
+                    video_type=args.video_type,
+                    progress_callback=progress,
+                )
+                video_path = fallback_path
+                caption_for_storage = fallback_caption
+                transcript = fallback_transcript
+            except Exception as fallback_exc:
+                LOGGER.warning("AI fallback re-render failed: %s", fallback_exc)
+
+            output_is_ai_styled = False
+            output_file = Path(video_path)
+
     # Shortform optimizer cleanup for all generated AI clips (including styled output).
     if SHORTFORM_AI_ENABLED:
         if output_is_ai_styled:
@@ -553,6 +583,28 @@ def command_generate_ai_video(args: argparse.Namespace) -> int:
         else:
             progress("Running short-form AI optimization...")
         video_path = optimize_shortform_video(video_path, transcript)
+        output_file = Path(video_path)
+        final_report = validate_render(output_file, transcript=transcript)
+        if not final_report.ok:
+            issues = ", ".join(final_report.issues) if final_report.issues else "unknown issues"
+            progress(f"⚠️ Short-form output quality check failed: {issues}")
+            if output_is_ai_styled:
+                progress("Styled output failed strict quality gate, switching to fallback render.")
+                try:
+                    fallback_path, fallback_caption, fallback_transcript = _render_local_ai_video_fallback(
+                        storage=storage,
+                        video_engine=video_engine,
+                        theme=args.theme,
+                        duration=args.duration,
+                        video_type=args.video_type,
+                        progress_callback=progress,
+                    )
+                    video_path = fallback_path
+                    caption_for_storage = fallback_caption
+                    transcript = fallback_transcript
+                except Exception as fallback_exc:
+                    LOGGER.warning("Short-form fallback re-render failed: %s", fallback_exc)
+            output_file = Path(video_path)
 
     # Create video record in database
     video_file = Path(video_path)
@@ -583,6 +635,68 @@ def command_generate_ai_video(args: argparse.Namespace) -> int:
     safe_emit(f"AI_VIDEO_JSON: {json.dumps(payload)}")
     safe_emit("DONE: AI video generation complete")
 
+    return 0
+
+
+def command_import_upload(args: argparse.Namespace) -> int:
+    storage, _, caption_engine, _, worker = build_services()
+
+    def safe_emit(line: str) -> None:
+        try:
+            print(line, flush=True)
+        except BrokenPipeError:
+            pass
+
+    videos = [Path(v).expanduser().resolve() for v in args.videos]
+    missing = [v for v in videos if not v.exists()]
+    if missing:
+        for m in missing:
+            safe_emit(f"ERROR: Video not found: {m}")
+        return 1
+
+    theme = args.theme
+    imported = 0
+
+    for video_path in videos:
+        safe_emit(f"PROGRESS: Importing {video_path.name} ({imported + 1}/{len(videos)})...")
+
+        video_id = _ensure_video_record(storage, video_path)
+
+        safe_emit(f"PROGRESS: Generating caption for {video_path.name}...")
+        try:
+            context = CaptionContext(
+                filename=video_path.name,
+                content_theme=theme,
+                clip_format="background_layer",
+                source_hint=video_path.stem,
+            )
+            caption = caption_engine.generate_caption(context)
+        except Exception as exc:
+            LOGGER.warning("Caption generation failed for %s: %s", video_path.name, exc)
+            caption = f"#{theme} #fyp #viral #tiktok"
+
+        storage.update_video(video_id, caption=caption, status="ready")
+        upload_id = storage.enqueue_upload(video_id)
+
+        size_bytes = int(video_path.stat().st_size) if video_path.exists() else 0
+        payload = {
+            "videoId": video_id,
+            "uploadId": upload_id,
+            "fileName": video_path.name,
+            "path": str(video_path),
+            "caption": caption,
+            "size": _human_size(size_bytes),
+            "status": "ready",
+        }
+        safe_emit(f"IMPORT_JSON: {json.dumps(payload)}")
+        imported += 1
+
+    if args.process_now:
+        safe_emit("PROGRESS: Processing upload queue...")
+        processed = worker.run_once(process_all=True)
+        safe_emit(f"QUEUE_PROCESSED: {processed}")
+
+    safe_emit(f"DONE: Imported {imported} video{'s' if imported != 1 else ''}")
     return 0
 
 
@@ -629,6 +743,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     backgrounds = subparsers.add_parser("list-backgrounds", help="List background assets")
     backgrounds.set_defaults(func=command_list_backgrounds)
+
+    import_upload = subparsers.add_parser("import-upload", help="Import existing videos and queue for upload")
+    import_upload.add_argument("--videos", nargs="+", required=True, help="Paths to video files")
+    import_upload.add_argument("--theme", default="interesting", choices=["scary", "dating", "crazy", "mystery", "motivational", "creepy", "interesting"])
+    import_upload.add_argument("--process-now", action="store_true")
+    import_upload.set_defaults(func=command_import_upload)
 
     generate_ai = subparsers.add_parser("generate-ai-video", help="Generate AI-powered video")
     generate_ai.add_argument("--theme", default="scary", choices=["scary", "dating", "crazy", "mystery", "motivational", "creepy", "interesting"])

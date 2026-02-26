@@ -13,7 +13,7 @@ from urllib import error, request
 
 try:
     import cv2  # type: ignore
-import numpy as np  # type: ignore
+    import numpy as np  # type: ignore
 
     CV_AVAILABLE = True
 except Exception:
