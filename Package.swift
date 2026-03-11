@@ -15,7 +15,10 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "TikTokUploadManager",
-            path: "Sources"
+            path: "Sources",
+            exclude: [
+                "TikTokUploadManager/Services/ai_video_generator.py"
+            ]
         )
     ]
 )

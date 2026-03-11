@@ -693,7 +693,7 @@ struct ContentView: View {
                 .frame(height: 160)
                 .background(Color(NSColor.windowBackgroundColor))
                 .clipShape(RoundedRectangle(cornerRadius: 8))
-                .onChange(of: vm.logs) { _ in
+                .onChange(of: vm.logs) { _, _ in
                     // Auto-scroll to bottom when logs update
                     withAnimation {
                         proxy.scrollTo("bottom", anchor: .bottom)
