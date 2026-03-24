@@ -567,7 +567,7 @@ class BackgroundManager:
         print("   GTA 5, Minecraft, Subway Surfers, Horror games, etc.")
 
         yt_dlp_bin = shutil.which("yt-dlp")
-        fallback_bin = Path("/Users/andrewpeterson/Library/Python/3.9/bin/yt-dlp")
+        fallback_bin = Path.home() / "Library/Python/3.9/bin/yt-dlp"
         if not yt_dlp_bin and fallback_bin.exists():
             yt_dlp_bin = str(fallback_bin)
         if not yt_dlp_bin:

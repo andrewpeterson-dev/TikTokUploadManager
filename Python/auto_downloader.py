@@ -27,7 +27,7 @@ class AutoDownloader:
         try:
             # Find youtube-dl
             youtube_dl_paths = [
-                '/Users/andrewpeterson/Library/Python/3.9/bin/youtube-dl',
+                str(Path.home() / 'Library/Python/3.9/bin/youtube-dl'),
                 '/usr/local/bin/youtube-dl',
                 'youtube-dl'
             ]
@@ -47,7 +47,7 @@ class AutoDownloader:
                     progress_callback("❌ youtube-dl not found, installing...")
                 # Try to install it
                 subprocess.run(['pip3', 'install', '--user', 'youtube-dl'], capture_output=True)
-                youtube_dl_path = '/Users/andrewpeterson/Library/Python/3.9/bin/youtube-dl'
+                youtube_dl_path = str(Path.home() / 'Library/Python/3.9/bin/youtube-dl')
 
             output_template = str(self.downloads_dir / '%(title)s.%(ext)s')
 
